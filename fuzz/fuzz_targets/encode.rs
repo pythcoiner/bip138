@@ -1,0 +1,83 @@
+#![no_main]
+
+extern crate bitcoin_encrypted_backup;
+use bitcoin_encrypted_backup::{
+    Content, Encryption, Version,
+    ll::{
+        decode_v1, encode_derivation_paths, encode_encrypted_payload, encode_individual_secrets,
+        encode_v1, increment_offset, nonce, parse_content, parse_derivation_paths,
+        parse_individual_secrets,
+    },
+};
+
+use libfuzzer_sys::fuzz_target;
+
+fn version(bytes: &[u8]) -> (usize, Version) {
+    if bytes.is_empty() {
+        return (1, Version::Unknown);
+    }
+    (1, Version::from(bytes[0]))
+}
+
+fn content(bytes: &[u8]) -> (usize, Content) {
+    if bytes.is_empty() {
+        return (1, Content::Unknown);
+    }
+    parse_content(bytes).unwrap_or((1, Content::Unknown))
+}
+fn encryption(bytes: &[u8]) -> (usize, Encryption) {
+    if bytes.is_empty() {
+        return (1, Encryption::Unknown);
+    }
+    (1, Encryption::from(bytes[0]))
+}
+
+fuzz_target!(|bytes: &[u8]| {
+    if bytes.len() < 5 {
+        return;
+    }
+    let (mut offset, version) = version(bytes);
+    if version != Version::V1 {
+        return;
+    }
+    let (incr, deriv) = parse_derivation_paths(&bytes[offset..]).unwrap_or_default();
+    offset = if let Ok(o) = increment_offset(bytes, offset, incr) {
+        o
+    } else {
+        return;
+    };
+    let (incr, secrets) = parse_individual_secrets(&bytes[offset..]).unwrap_or_default();
+    offset = if let Ok(o) = increment_offset(bytes, offset, incr) {
+        o
+    } else {
+        return;
+    };
+    let (incr, _content) = content(&bytes[offset..]);
+    offset = if let Ok(o) = increment_offset(bytes, offset, incr) {
+        o
+    } else {
+        return;
+    };
+    let (incr, encryption) = encryption(&bytes[offset..]);
+    if !encryption.is_defined() {
+        return;
+    }
+    let _offset = if let Ok(o) = increment_offset(bytes, offset, incr) {
+        o
+    } else {
+        return;
+    };
+
+    let deriv = encode_derivation_paths(deriv).unwrap();
+    let secrets = if let Ok(is) = encode_individual_secrets(&secrets) {
+        is
+    } else {
+        return;
+    };
+
+    let payload = encode_encrypted_payload(nonce(), "0".as_bytes()).unwrap();
+
+    let bytes = encode_v1(version.into(), deriv, secrets, encryption.into(), payload);
+
+    let _ = decode_v1(&bytes).unwrap();
+});
