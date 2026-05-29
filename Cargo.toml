@@ -1,0 +1,16 @@
+[package]
+name = "bip138"
+version = "0.0.0"
+edition = "2021"
+readme = "README.md"
+description = "BIP138 Compact encryption scheme for Non-seed wallet data"
+license = "MIT"
+repository = "https://github.com/pythcoiner/bip138"
+documentation = "https://docs.rs/bip138"
+include = ["Cargo.toml", "LICENSE", "README.md", "src/lib.rs"]
+publish = true
+
+[lib]
+path = "src/lib.rs"
+
+[dependencies]
