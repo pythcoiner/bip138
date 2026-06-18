@@ -150,7 +150,7 @@ async fn main() -> Result<(), CliError> {
             // pass the byte vector to a file
             let mut output = File::create(&output_path).map_err(CliError::CreateError)?;
             output
-                .write(&encrypted.bytes)
+                .write_all(&encrypted.bytes)
                 .map_err(CliError::WriteError)?;
             println!("descriptor written to {output_path:?}");
         }
