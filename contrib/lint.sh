@@ -3,3 +3,4 @@
 set -eu
 cargo fmt -- --check
 cargo clippy --all-targets -- -D warnings
+cargo clippy --all-targets --no-default-features --features "miniscript_latest rand base64 v0" -- -D warnings

@@ -1,4 +1,7 @@
-#![cfg_attr(not(any(test, feature = "devices")), no_std)]
+#![cfg_attr(
+    not(any(test, feature = "devices", feature = "descriptor_backup")),
+    no_std
+)]
 use crate::alloc::string::ToString;
 extern crate alloc;
 use alloc::{boxed::Box, string::String, vec, vec::Vec};
@@ -10,12 +13,16 @@ use crate::miniscript::{
     bitcoin::{bip32::DerivationPath, secp256k1},
     Descriptor, DescriptorPublicKey,
 };
+#[cfg(feature = "descriptor_backup")]
+pub use descriptor_backup::{parse_descriptor_backup, DescriptorBackup, DescriptorSet};
 pub use ll::{Content, Padding};
 
 #[cfg(feature = "tokio")]
 pub use tokio;
 
 pub mod descriptor;
+#[cfg(feature = "descriptor_backup")]
+pub mod descriptor_backup;
 pub mod ll;
 pub mod miniscript;
 #[cfg(feature = "devices")]
@@ -107,6 +114,8 @@ impl ToPayload for Descriptor<DescriptorPublicKey> {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Decrypted {
     Descriptor(Box<Descriptor<DescriptorPublicKey>>),
+    #[cfg(feature = "descriptor_backup")]
+    DescriptorBackup(Box<DescriptorBackup>),
     Policy,
     Labels,
     WalletBackup(Vec<u8>),
@@ -325,10 +334,20 @@ impl EncryptedBackup {
         match content {
             Content::None | Content::Unknown => Ok(Decrypted::Raw(bytes)),
             Content::Bip380 => {
+                // Try a bare descriptor first; fall back to a JSON descriptor
+                // backup document if it is not a descriptor.
                 let descr_str = String::from_utf8(bytes).map_err(|_| Error::Utf8)?;
-                let descriptor = Descriptor::<DescriptorPublicKey>::from_str(&descr_str)
-                    .map_err(|_| Error::Descriptor)?;
-                Ok(Decrypted::Descriptor(Box::new(descriptor)))
+                match Descriptor::<DescriptorPublicKey>::from_str(&descr_str) {
+                    Ok(descriptor) => Ok(Decrypted::Descriptor(Box::new(descriptor))),
+                    #[cfg(feature = "descriptor_backup")]
+                    Err(_) => {
+                        let backup =
+                            descriptor_backup::parse_descriptor_backup(descr_str.as_bytes())?;
+                        Ok(Decrypted::DescriptorBackup(Box::new(backup)))
+                    }
+                    #[cfg(not(feature = "descriptor_backup"))]
+                    Err(_) => Err(Error::Descriptor),
+                }
             }
             Content::BIP(_)
             | Content::Proprietary(_)
@@ -488,6 +507,8 @@ pub enum Error {
     Ll(ll::Error),
     Utf8,
     Descriptor,
+    #[cfg(feature = "descriptor_backup")]
+    DescriptorBackup,
     NotImplemented,
     UnknownContent,
     EncryptionUndefined,
@@ -509,7 +530,11 @@ impl From<ll::Error> for Error {
     }
 }
 
-#[cfg(all(test, feature = "rand"))]
+// These tests pin the single-descriptor BIP380 path: `impl ToPayload for
+// Descriptor` and `Decrypted::Descriptor`. With `descriptor_backup` on, the
+// BIP380 plaintext is a backup document instead, exercised by the
+// `descriptor_backup_roundtrip` module, so this module is feature-off only.
+#[cfg(all(test, feature = "rand", not(feature = "descriptor_backup")))]
 mod tests {
     use crate::miniscript::bitcoin;
 
@@ -1210,6 +1235,83 @@ mod tests {
             v = i.into();
             assert_eq!(v, Version::Unknown);
         }
+    }
+}
+
+#[cfg(all(test, feature = "rand", feature = "descriptor_backup"))]
+mod descriptor_backup_roundtrip {
+    use super::*;
+    use crate::descriptor_backup::{DescriptorBackup, DescriptorSet};
+
+    const MULTIPATH: &str = "wpkh([d34db33f/84h/1h/0h]tpubDC5FSnBiZDMmhiuCmWAYsLwgLYrrT9rAqvTySfuCCrgsWz8wxMXUS9Tb9iVMvcRbvFcAHGkMD5Kx8koh4GquNGNTfohfk7pgjhaPCdXpoba/<0;1>/*)";
+    const RECEIVE: &str = "wpkh([d34db33f/84h/1h/0h]tpubDC5FSnBiZDMmhiuCmWAYsLwgLYrrT9rAqvTySfuCCrgsWz8wxMXUS9Tb9iVMvcRbvFcAHGkMD5Kx8koh4GquNGNTfohfk7pgjhaPCdXpoba/0/*)";
+    const CHANGE: &str = "wpkh([d34db33f/84h/1h/0h]tpubDC5FSnBiZDMmhiuCmWAYsLwgLYrrT9rAqvTySfuCCrgsWz8wxMXUS9Tb9iVMvcRbvFcAHGkMD5Kx8koh4GquNGNTfohfk7pgjhaPCdXpoba/1/*)";
+
+    fn descr(s: &str) -> Descriptor<DescriptorPublicKey> {
+        Descriptor::<DescriptorPublicKey>::from_str(s).unwrap()
+    }
+
+    fn roundtrip(backup: DescriptorBackup) {
+        let backp = EncryptedBackup::new().set_payload(&backup).unwrap();
+        let keys = backp.get_keys();
+        assert!(!keys.is_empty());
+        let bytes = backp.encrypt().unwrap().bytes;
+        let restored = EncryptedBackup::new()
+            .set_encrypted_payload(&bytes)
+            .unwrap()
+            .set_keys(keys)
+            .decrypt()
+            .unwrap();
+        assert_eq!(restored, Decrypted::DescriptorBackup(Box::new(backup)));
+    }
+
+    #[test]
+    fn bare_descriptor_roundtrips() {
+        // A single descriptor encodes as a bare string (serde-free) and decodes
+        // back to Decrypted::Descriptor, even with the document feature on.
+        let descriptor = descr(MULTIPATH);
+        let backp = EncryptedBackup::new().set_payload(&descriptor).unwrap();
+        let keys = backp.get_keys();
+        let bytes = backp.encrypt().unwrap().bytes;
+        let restored = EncryptedBackup::new()
+            .set_encrypted_payload(&bytes)
+            .unwrap()
+            .set_keys(keys)
+            .decrypt()
+            .unwrap();
+        assert_eq!(restored, Decrypted::Descriptor(Box::new(descriptor)));
+    }
+
+    #[test]
+    fn one_set_document_roundtrip() {
+        // A one-set document round-trips through the JSON encoding.
+        let backup = DescriptorBackup {
+            version: 1,
+            descriptor_sets: vec![DescriptorSet {
+                descriptor: descr(MULTIPATH),
+                change_descriptor: None,
+                archived: false,
+                range: None,
+                birth_time: None,
+            }],
+        };
+        roundtrip(backup);
+    }
+
+    #[test]
+    fn json_document_roundtrip() {
+        // Metadata forces the JSON form; the typed model must survive the trip.
+        let backup = DescriptorBackup {
+            version: 1,
+            descriptor_sets: vec![DescriptorSet {
+                descriptor: descr(RECEIVE),
+                change_descriptor: Some(descr(CHANGE)),
+                archived: true,
+                range: Some((0, 999)),
+                birth_time: Some(1710000000),
+            }],
+        };
+        roundtrip(backup);
     }
 }
 

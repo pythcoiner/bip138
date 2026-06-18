@@ -2,7 +2,7 @@ use bip138::miniscript;
 
 use clap::{Parser, Subcommand};
 
-use bip138::{Decrypted, EncryptedBackup};
+use bip138::{Decrypted, EncryptedBackup, ToPayload};
 use miniscript::{descriptor::DescriptorKeyParseError, Descriptor, DescriptorPublicKey};
 
 use std::{
@@ -229,12 +229,14 @@ async fn main() -> Result<(), CliError> {
                 .decrypt()
                 .map_err(CliError::FailedToDecrypt)?;
 
-            let descriptor = if let Decrypted::Descriptor(descr) = decrypted {
-                descr.to_string()
-            } else {
-                return Err(CliError::Content);
+            let document = match decrypted {
+                Decrypted::Descriptor(descr) => descr.to_string().into_bytes(),
+                Decrypted::DescriptorBackup(backup) => {
+                    backup.to_payload().map_err(CliError::FailedToDecrypt)?
+                }
+                _ => return Err(CliError::Content),
             };
-            fs::write(&output_path, &descriptor).map_err(CliError::WriteError)?;
+            fs::write(&output_path, &document).map_err(CliError::WriteError)?;
             println!("descriptor written to {output_path:?}");
         }
     }

@@ -29,6 +29,10 @@ mscript_12_0 = { version = "12.0", default-features = false, features = ["serde"
 # devices
 async-hwi = {version = "0.0.29", optional = true}
 
+# descriptor_backup (std-only document parsing)
+serde = { version = "1.0.228", features = ["derive"], optional = true }
+serde_json = { version = "1.0.145", optional = true }
+
 # cli
 clap = { version = "=4.5.42", features = ["derive"] , optional = true}
 tokio = { version = "1", features = ["macros", "net", "rt", "rt-multi-thread", "io-util", "sync"], optional = true}
@@ -45,7 +49,7 @@ path = "src/bin/main.rs"
 required-features = ["cli"]
 
 [features]
-default = ["miniscript_latest", "rand", "base64", "v0"]
+default = ["miniscript_latest", "rand", "base64", "v0", "descriptor_backup"]
 rand = ["dep:rand"]
 base64 = ["dep:base64"]
 v0 = ["dep:bitcoin-encrypted-backup-v0"]
@@ -54,5 +58,6 @@ miniscript_12_3_5 = ["mscript_12_3_5", "bitcoin-encrypted-backup-v0?/miniscript_
 miniscript_12_0 = ["mscript_12_0", "bitcoin-encrypted-backup-v0?/miniscript_12_0"]
 tokio = ["dep:tokio"]
 devices = ["dep:async-hwi", "tokio"]
-cli = ["dep:clap", "tokio", "miniscript_latest", "rand"]
+descriptor_backup = ["dep:serde", "dep:serde_json"]
+cli = ["dep:clap", "tokio", "miniscript_latest", "rand", "descriptor_backup"]
 
