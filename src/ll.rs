@@ -221,6 +221,10 @@ pub fn nonce() -> [u8; 12] {
 }
 
 pub fn decryption_secret(keys: &[[u8; XONLY_KEY_SIZE]]) -> sha256::Hash {
+    // The secret is defined over the keys in increasing lexicographic order, so
+    // sort here rather than trust the caller to pass them sorted.
+    let mut keys = keys.to_vec();
+    keys.sort();
     let bytes = keys.iter().fold(vec![], |mut a, b| {
         a.append(&mut b.to_vec());
         a
@@ -552,10 +556,10 @@ fn encrypt_chacha20_poly1305_v1_with_nonce(
     if derivation_paths.len() > u8::MAX as usize {
         return Err(Error::DerivPathCount);
     }
-    // NOTE:  RFC5116 define the max length of the plaintext to 2^36 - 31
-    // but for convenience we limit it to u32::MAX in order to not exceed
-    // usize::MAX on 32 bits architectures
-    // https://datatracker.ietf.org/doc/html/rfc5116#section-5.1
+    // NOTE: RFC 8439 caps ChaCha20-Poly1305 plaintext at 2^38 - 64 bytes, but we
+    // limit it to u32::MAX so the length never exceeds usize::MAX on 32-bit
+    // architectures.
+    // https://datatracker.ietf.org/doc/html/rfc8439#section-2.8
     if data.len() > u32::MAX as usize {
         return Err(Error::DataLength);
     }
@@ -570,11 +574,10 @@ fn encrypt_chacha20_poly1305_v1_with_nonce(
         return Err(Error::ContentMetadata);
     }
 
-    let mut raw_keys = keys
+    let raw_keys = keys
         .into_iter()
         .map(|k| k.x_only_public_key().0.serialize())
         .collect::<Vec<[u8; XONLY_KEY_SIZE]>>();
-    raw_keys.sort();
 
     let secret = decryption_secret(&raw_keys);
     let individual_secrets =
