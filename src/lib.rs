@@ -267,11 +267,11 @@ impl EncryptedBackup {
         #[cfg_attr(not(feature = "v0"), allow(unused_mut))] mut self,
         bytes: &[u8],
     ) -> Result<Self, Error> {
-        // Auto-detect: the binary BIPXXX blob always starts with the
-        // 6-byte ASCII magic "BIPXXX". If the input does not start with
-        // that prefix, try decoding it as standard RFC 4648 base64 (the
-        // format produced by bitcoin-core's wallet tool). Base64 of any
-        // BIPXXX blob starts with "Qkl..." so the check is unambiguous.
+        // Auto-detect: the binary BIP138 blob always starts with the
+        // 6-byte ASCII magic "BIP138". If the input does not start with
+        // that prefix, try decoding it as standard RFC 4648 base64.
+        // Base64 of any BIP138 blob starts with "Qkl..." so the check
+        // is unambiguous.
         if bytes.starts_with(ll::MAGIC.as_bytes()) {
             return self.set_encrypted_payload_binary(bytes);
         }
@@ -805,8 +805,8 @@ mod tests {
     // single-signature policies would yield c_i = 0x0...0 (i.e. a backup that
     // leaks the encryption secret in plaintext). They demonstrate the opposite:
     // because the decryption secret `s` and the per-key term `s_i` are derived
-    // with *different* tagged hashes (`BIPXXX_DECRYPTION_SECRET` vs
-    // `BIPXXX_INDIVIDUAL_SECRET`), `s != s_i` and so `c_1 = s ^ s_1 != 0` even
+    // with *different* tagged hashes (`BIP138_DECRYPTION_SECRET` vs
+    // `BIP138_INDIVIDUAL_SECRET`), `s != s_i` and so `c_1 = s ^ s_1 != 0` even
     // when n = 1.
 
     #[test]
@@ -821,7 +821,7 @@ mod tests {
             .serialize();
 
         let s = ll::decryption_secret(&[xonly]);
-        let s1 = ll::tagged_hash("BIPXXX_INDIVIDUAL_SECRET".as_bytes(), &xonly);
+        let s1 = ll::tagged_hash("BIP138_INDIVIDUAL_SECRET".as_bytes(), &xonly);
         let c1 = ll::individual_secret(&s, &xonly);
 
         assert_ne!(
@@ -1252,7 +1252,7 @@ mod v0_tests {
     #[test]
     fn test_encrypt_never_emits_v0() {
         // Pin "decrypt-only": the current crate must always produce
-        // BIPXXX blobs, never BEB. A future refactor cannot accidentally
+        // BIP138 blobs, never BEB. A future refactor cannot accidentally
         // re-introduce v0-format output.
         let descriptor = descriptor::tests::descr_1();
         let bytes = EncryptedBackup::new()
@@ -1263,7 +1263,7 @@ mod v0_tests {
             .bytes;
         assert!(
             bytes.starts_with(ll::MAGIC.as_bytes()),
-            "current encrypt must emit BIPXXX magic"
+            "current encrypt must emit BIP138 magic"
         );
         assert!(
             !bytes.starts_with(V0_MAGIC),

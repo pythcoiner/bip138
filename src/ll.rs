@@ -23,9 +23,9 @@ use rand::{rngs::OsRng, TryRngCore};
 
 use crate::{descriptor::bip341_nums, Encryption, Version};
 
-const DECRYPTION_SECRET: &str = "BIPXXX_DECRYPTION_SECRET";
-const INDIVIDUAL_SECRET: &str = "BIPXXX_INDIVIDUAL_SECRET";
-pub const MAGIC: &str = "BIPXXX";
+const DECRYPTION_SECRET: &str = "BIP138_DECRYPTION_SECRET";
+const INDIVIDUAL_SECRET: &str = "BIP138_INDIVIDUAL_SECRET";
+pub const MAGIC: &str = "BIP138";
 
 /// Size in bytes of a 32-byte x-only Schnorr/BIP340 public key.
 pub const XONLY_KEY_SIZE: usize = SCHNORR_PUBLIC_KEY_SIZE;
@@ -788,8 +788,8 @@ mod tests {
 
     #[test]
     fn test_parse_magic() {
-        let magic = "BIPXXX".as_bytes();
-        assert_eq!(MAGIC, "BIPXXX");
+        let magic = "BIP138".as_bytes();
+        assert_eq!(MAGIC, "BIP138");
         let offset = parse_magic_byte(magic).unwrap();
         assert_eq!(offset, magic.len());
         let res = parse_magic_byte("BOBtst".as_bytes());
