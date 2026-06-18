@@ -353,6 +353,9 @@ impl EncryptedBackup {
                     individual_secrets,
                     nonce,
                 } => {
+                    if self.encryption != Encryption::ChaCha20Poly1305 {
+                        return Err(Error::UnsupportedEncryption);
+                    }
                     for key in &self.keys {
                         if let Ok((content, bytes)) = ll::decrypt_chacha20_poly1305_v1(
                             *key,
@@ -488,6 +491,7 @@ pub enum Error {
     NotImplemented,
     UnknownContent,
     EncryptionUndefined,
+    UnsupportedEncryption,
     InvalidVersion,
     WrongPayload,
     UnknownVersion,
@@ -705,6 +709,39 @@ mod tests {
             .decrypt()
             .unwrap_err();
         assert_eq!(fail, Error::UnknownVersion);
+    }
+
+    #[test]
+    fn test_decrypt_unsupported_encryption() {
+        // A backup whose ENCRYPTION byte is an undefined algorithm id must fail
+        // with UnsupportedEncryption, not WrongKey.
+        let key = dpk_to_pk(&descriptor::tests::dpk_1()).unwrap();
+        let bytes = EncryptedBackup::new()
+            .set_payload(&vec![0x00])
+            .unwrap()
+            .set_keys(vec![key])
+            .set_content_type(Content::Bip380)
+            .encrypt()
+            .unwrap()
+            .bytes;
+
+        // Re-encode the same parts with encryption id 0x02 (undefined).
+        let (paths, secrets, _enc, nonce, cyphertext) = ll::decode_v1(&bytes).unwrap();
+        let tampered = ll::encode_v1(
+            Version::V1.into(),
+            ll::encode_derivation_paths(paths).unwrap(),
+            ll::encode_individual_secrets(&secrets).unwrap(),
+            0x02,
+            ll::encode_encrypted_payload(nonce, &cyphertext).unwrap(),
+        );
+
+        let err = EncryptedBackup::new()
+            .set_encrypted_payload(&tampered)
+            .unwrap()
+            .set_keys(vec![key])
+            .decrypt()
+            .unwrap_err();
+        assert_eq!(err, Error::UnsupportedEncryption);
     }
 
     #[test]
