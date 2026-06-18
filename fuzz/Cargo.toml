@@ -10,7 +10,7 @@ cargo-fuzz = true
 [dependencies]
 libfuzzer-sys = "0.4"
 
-[dependencies.bitcoin-encrypted-backup]
+[dependencies.bip138]
 path = ".."
 
 [[bin]]

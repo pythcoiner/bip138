@@ -1,7 +1,7 @@
 #![no_main]
 
-extern crate bitcoin_encrypted_backup;
-use bitcoin_encrypted_backup::ll::decode_v1;
+extern crate bip138;
+use bip138::ll::decode_v1;
 
 use libfuzzer_sys::fuzz_target;
 
