@@ -8,6 +8,7 @@
 //! guarantees the root never goes on-chain.
 
 use alloc::{boxed::Box, collections::BTreeSet, string::String, vec::Vec};
+use core::str::FromStr;
 
 use serde::{Deserialize, Serialize};
 
@@ -15,8 +16,9 @@ use crate::{
     descriptor::{bip341_nums, dpk_to_deriv_path},
     miniscript::{
         bitcoin::{bip32::DerivationPath, secp256k1},
-        DescriptorPublicKey,
+        Descriptor, DescriptorPublicKey,
     },
+    wallet_policy::WalletPolicy,
     Content, Decrypted, Error, ToPayload, Warning,
 };
 
@@ -48,6 +50,34 @@ impl PolicySet {
     /// A set with no metadata round-trips to the single `{keys, policy}` form.
     fn is_bare(&self) -> bool {
         !self.archived && self.range.is_none() && self.birth_time.is_none()
+    }
+
+    /// Build a policy set from a concrete descriptor: the template string and
+    /// its key info vector, with no metadata. The template is stored without the
+    /// descriptor checksum, matching the BIP388 wire form.
+    pub fn from_descriptor(d: &Descriptor<DescriptorPublicKey>) -> Result<Self, Error> {
+        let wp = WalletPolicy::from_descriptor(d)?;
+        let mut policy = wp.template.to_string();
+        if let Some(pos) = policy.rfind('#') {
+            policy.truncate(pos);
+        }
+        Ok(PolicySet {
+            keys: wp.key_info,
+            policy,
+            archived: false,
+            range: None,
+            birth_time: None,
+        })
+    }
+
+    /// Rebuild the concrete descriptor from the policy template and keys.
+    pub fn to_descriptor(&self) -> Result<Descriptor<DescriptorPublicKey>, Error> {
+        let template = Descriptor::from_str(&self.policy).map_err(|_| Error::WalletPolicy)?;
+        WalletPolicy {
+            template,
+            key_info: self.keys.clone(),
+        }
+        .into_descriptor()
     }
 }
 
@@ -363,5 +393,21 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn policy_set_descriptor_roundtrip() {
+        let descriptor = Descriptor::<DescriptorPublicKey>::from_str(
+            "wsh(sortedmulti(2,[6738736c/48'/0'/0'/2']xpub6FC1fXFP1GXLX5TKtcjHGT4q89SDRehkQLtbKJ2PzWcvbBHtyDsJPLtpLtkGqYNYZdVVAjRQ5kug9CsapegmmeRutpP7PW4u4wVF9JfkDhw/<0;1>/*,[b2b1f0cf/48'/0'/0'/2']xpub6EWhjpPa6FqrcaPBuGBZRJVjzGJ1ZsMygRF26RwN932Vfkn1gyCiTbECVitBjRCkexEvetLdiqzTcYimmzYxyR1BZ79KNevgt61PDcukmC7/<0;1>/*))",
+        )
+        .unwrap();
+        let set = PolicySet::from_descriptor(&descriptor).unwrap();
+        assert_eq!(set.policy, "wsh(sortedmulti(2,@0/**,@1/**))");
+        assert_eq!(set.keys, vec![key(KEY0), key(KEY1)]);
+        assert!(set.is_bare());
+
+        let rebuilt = set.to_descriptor().unwrap();
+        let strip = |s: &str| s.rsplit_once('#').map(|(b, _)| b.to_string());
+        assert_eq!(strip(&rebuilt.to_string()), strip(&descriptor.to_string()));
     }
 }

@@ -31,6 +31,8 @@ pub mod miniscript;
 pub mod policy_backup;
 #[cfg(feature = "devices")]
 pub mod signing_devices;
+#[cfg(feature = "descriptor_backup")]
+pub mod wallet_policy;
 
 /// Non-fatal signal raised while extracting keys from a descriptor: a key
 /// expression was sorted out of the encryption-key set. The cosigner
@@ -524,6 +526,8 @@ pub enum Error {
     Descriptor,
     #[cfg(feature = "descriptor_backup")]
     DescriptorBackup,
+    #[cfg(feature = "descriptor_backup")]
+    WalletPolicy,
     NotImplemented,
     UnknownContent,
     EncryptionUndefined,
