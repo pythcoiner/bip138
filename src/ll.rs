@@ -27,6 +27,10 @@ const DECRYPTION_SECRET: &str = "BIP138_DECRYPTION_SECRET";
 const INDIVIDUAL_SECRET: &str = "BIP138_INDIVIDUAL_SECRET";
 pub const MAGIC: &str = "BIP138";
 
+pub const PADDING_MIN_SIZE: usize = 10 * 1024;
+const PADDING_GROWTH_NUMERATOR: usize = 5;
+const PADDING_GROWTH_DENOMINATOR: usize = 4;
+
 /// Size in bytes of a 32-byte x-only Schnorr/BIP340 public key.
 pub const XONLY_KEY_SIZE: usize = SCHNORR_PUBLIC_KEY_SIZE;
 
@@ -57,6 +61,7 @@ pub enum Error {
     ContentReserved,
     EncryptionReserved,
     ZeroedNonce,
+    Padding,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -272,6 +277,73 @@ pub fn encrypt_with_nonce(
         .map_err(|_| Error::Encrypt)
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Padding {
+    None,
+    Geometric,
+}
+
+impl Padding {
+    pub fn padded_size(&self, len: usize) -> Result<usize, Error> {
+        match self {
+            Padding::None => Ok(len),
+            Padding::Geometric => geometric_bucket(len),
+        }
+    }
+}
+
+fn geometric_bucket(len: usize) -> Result<usize, Error> {
+    if len <= PADDING_MIN_SIZE {
+        return Ok(PADDING_MIN_SIZE);
+    }
+    let mut numerator = PADDING_MIN_SIZE as u128;
+    let mut denominator = 1u128;
+    let len = len as u128;
+    let mut target = numerator / denominator;
+    while target < len {
+        numerator = numerator
+            .checked_mul(PADDING_GROWTH_NUMERATOR as u128)
+            .ok_or(Error::Padding)?;
+        denominator = denominator
+            .checked_mul(PADDING_GROWTH_DENOMINATOR as u128)
+            .ok_or(Error::Padding)?;
+        target = numerator / denominator;
+    }
+    usize::try_from(target).map_err(|_| Error::Padding)
+}
+
+pub fn encode_plaintext(
+    content_metadata: Vec<u8>,
+    data: &[u8],
+    padding: Padding,
+) -> Result<Vec<u8>, Error> {
+    let mut payload = content_metadata;
+    let mut data_len = bitcoin::consensus::serialize(&bitcoin::VarInt(data.len() as u64));
+    payload.append(&mut data_len);
+    payload.append(&mut data.to_vec());
+
+    let target = padding.padded_size(payload.len())?;
+    payload.resize(target, 0u8);
+    Ok(payload)
+}
+
+pub fn decode_plaintext(bytes: &[u8]) -> Result<(Content, Vec<u8>), Error> {
+    let mut offset = init_offset(bytes, 0)?;
+    // <CONTENT_METADATA>
+    let (incr, content) = parse_content(bytes)?;
+    offset = increment_offset(bytes, offset, incr)?;
+
+    // <LENGTH>
+    let (VarInt(data_len), incr) = parse_varint(&bytes[offset..]).ok_or(Error::DataLength)?;
+    offset = increment_offset(bytes, offset, incr)?;
+    let data_len = usize::try_from(data_len).map_err(|_| Error::DataLength)?;
+    check_offset_lookahead(offset, bytes, data_len)?;
+    let end = offset.checked_add(data_len).ok_or(Error::OffsetOverflow)?;
+
+    // bytes past DATA are padding/vendor data, ignored
+    Ok((content, bytes[offset..end].to_vec()))
+}
+
 /// Encode following this format:
 /// <LENGTH><DERIVATION_PATH_1><DERIVATION_PATH_2><..><DERIVATION_PATH_N>
 pub fn encode_derivation_paths(derivation_paths: Vec<DerivationPath>) -> Result<Vec<u8>, Error> {
@@ -453,6 +525,7 @@ fn encrypt_chacha20_poly1305_v1_with_nonce(
     keys: Vec<secp256k1::PublicKey>,
     data: &[u8],
     nonce: [u8; 12],
+    padding: Padding,
 ) -> Result<Vec<u8>, Error> {
     // drop duplicates keys and sort out bip341 nums
     let nums_xonly = bip341_nums().x_only_public_key().0;
@@ -503,9 +576,8 @@ fn encrypt_chacha20_poly1305_v1_with_nonce(
         encode_individual_secrets(&individual_secrets(&secret, raw_keys.as_slice()))?;
     let derivation_paths = encode_derivation_paths(derivation_paths)?;
 
-    // <PAYLOAD> = <CONTENT_METADATA><DATA>
-    let mut payload = content_metadata;
-    payload.append(&mut data.to_vec());
+    // <PAYLOAD> = <CONTENT_METADATA><LENGTH><DATA>(<PADDING>)
+    let payload = encode_plaintext(content_metadata, data, padding)?;
 
     let (nonce, cyphertext) = encrypt_with_nonce(secret, payload.to_vec(), nonce)?;
     let encrypted_payload = encode_encrypted_payload(nonce, cyphertext.as_slice())?;
@@ -524,11 +596,19 @@ pub fn encrypt_chacha20_poly1305_v1(
     content_metadata: Content,
     keys: Vec<secp256k1::PublicKey>,
     data: &[u8],
+    padding: Padding,
     #[cfg(not(feature = "rand"))] nonce: [u8; 12],
 ) -> Result<Vec<u8>, Error> {
     #[cfg(feature = "rand")]
     let nonce = nonce();
-    encrypt_chacha20_poly1305_v1_with_nonce(derivation_paths, content_metadata, keys, data, nonce)
+    encrypt_chacha20_poly1305_v1_with_nonce(
+        derivation_paths,
+        content_metadata,
+        keys,
+        data,
+        nonce,
+        padding,
+    )
 }
 
 pub fn try_decrypt_chacha20_poly1305(
@@ -555,13 +635,7 @@ pub fn decrypt_chacha20_poly1305_v1(
     for ci in individual_secrets {
         let secret = xor(si.as_byte_array(), ci);
         if let Some(out) = try_decrypt_chacha20_poly1305(&cyphertext, &secret, nonce) {
-            let mut offset = init_offset(&out, 0)?;
-            // <CONTENT_METADATA>
-            let (incr, content) = parse_content(&out)?;
-            // <DECRYPTED_PAYLOAD>
-            offset = increment_offset(&out, offset, incr)?;
-            let out = out[offset..].to_vec();
-            return Ok((content, out));
+            return decode_plaintext(&out);
         }
     }
 
@@ -994,6 +1068,38 @@ mod tests {
     }
 
     #[test]
+    fn test_padding_size_buckets() {
+        let g = Padding::Geometric;
+        assert_eq!(g.padded_size(1).unwrap(), PADDING_MIN_SIZE);
+        assert_eq!(g.padded_size(PADDING_MIN_SIZE).unwrap(), PADDING_MIN_SIZE);
+        assert_eq!(g.padded_size(PADDING_MIN_SIZE + 1).unwrap(), 12_800);
+        assert_eq!(g.padded_size(12_801).unwrap(), 16_000);
+        assert_eq!(g.padded_size(39_063).unwrap(), 48_828);
+        // None never pads
+        assert_eq!(Padding::None.padded_size(1).unwrap(), 1);
+    }
+
+    #[test]
+    fn test_encode_decode_plaintext_ignores_padding() {
+        let content_metadata: Vec<u8> = Content::Bip380.try_into().unwrap();
+
+        // padded: payload grows to the bucket, decode still recovers the data
+        let padded =
+            encode_plaintext(content_metadata.clone(), b"test", Padding::Geometric).unwrap();
+        assert_eq!(padded.len(), PADDING_MIN_SIZE);
+        let (content, data) = decode_plaintext(&padded).unwrap();
+        assert_eq!(content, Content::Bip380);
+        assert_eq!(data, b"test");
+
+        // unpadded: <CONTENT_METADATA(3)><LENGTH(1)><DATA(4)>, no trailing bytes
+        let plain = encode_plaintext(content_metadata, b"test", Padding::None).unwrap();
+        assert_eq!(plain.len(), 3 + 1 + 4);
+        let (content, data) = decode_plaintext(&plain).unwrap();
+        assert_eq!(content, Content::Bip380);
+        assert_eq!(data, b"test");
+    }
+
+    #[test]
     fn test_simple_encode_decode_encrypted_payload() {
         let bytes = encode_encrypted_payload([3; 12], &[1, 2, 3, 4]).unwrap();
         let mut expected = [3; 12].to_vec();
@@ -1212,7 +1318,7 @@ mod tests {
         // Empty keyvector must fail
         let keys = vec![];
         let data = "test".as_bytes().to_vec();
-        let res = encrypt_chacha20_poly1305_v1(vec![], Content::Bip380, keys, &data);
+        let res = encrypt_chacha20_poly1305_v1(vec![], Content::Bip380, keys, &data, Padding::None);
         assert_eq!(res, Err(Error::KeyCount));
 
         // > 255 keys must fail
@@ -1228,12 +1334,12 @@ mod tests {
             }
         }
         let keys = keys.into_iter().collect::<Vec<_>>();
-        let res = encrypt_chacha20_poly1305_v1(vec![], Content::Bip380, keys, &data);
+        let res = encrypt_chacha20_poly1305_v1(vec![], Content::Bip380, keys, &data, Padding::None);
         assert_eq!(res, Err(Error::KeyCount));
 
         // Empty payload must fail
         let keys = [pk1()].to_vec();
-        let res = encrypt_chacha20_poly1305_v1(vec![], Content::Bip380, keys, &[]);
+        let res = encrypt_chacha20_poly1305_v1(vec![], Content::Bip380, keys, &[], Padding::None);
         assert_eq!(res, Err(Error::DataLength));
 
         // > 255 deriv path must fail
@@ -1247,7 +1353,8 @@ mod tests {
             deriv_paths.insert(deriv);
         }
         let deriv_paths = deriv_paths.into_iter().collect();
-        let res = encrypt_chacha20_poly1305_v1(deriv_paths, Content::Bip380, keys, &data);
+        let res =
+            encrypt_chacha20_poly1305_v1(deriv_paths, Content::Bip380, keys, &data, Padding::None);
         assert_eq!(res, Err(Error::DerivPathCount));
     }
 
@@ -1255,7 +1362,9 @@ mod tests {
     fn test_basic_encrypt_decrypt() {
         let keys = vec![pk2(), pk1()];
         let data = "test".as_bytes().to_vec();
-        let bytes = encrypt_chacha20_poly1305_v1(vec![], Content::Bip380, keys, &data).unwrap();
+        let bytes =
+            encrypt_chacha20_poly1305_v1(vec![], Content::Bip380, keys, &data, Padding::None)
+                .unwrap();
 
         let version = decode_version(&bytes).unwrap();
         assert_eq!(version, 1);
@@ -1280,6 +1389,26 @@ mod tests {
         let decrypted_3 =
             decrypt_chacha20_poly1305_v1(pk3(), &individual_secrets, cyphertext.clone(), nonce);
         assert!(decrypted_3.is_err());
+    }
+
+    #[test]
+    fn test_padded_encrypt_decrypt() {
+        let keys = vec![pk2(), pk1()];
+        let data = "test".as_bytes().to_vec();
+        let bytes =
+            encrypt_chacha20_poly1305_v1(vec![], Content::Bip380, keys, &data, Padding::Geometric)
+                .unwrap();
+
+        let (_, individual_secrets, encryption_type, nonce, cyphertext) =
+            decode_v1(&bytes).unwrap();
+        // padding lives in the plaintext, the encryption byte stays 0x01
+        assert_eq!(encryption_type, 0x01);
+        assert_eq!(cyphertext.len(), PADDING_MIN_SIZE + 16);
+
+        let (content, decrypted) =
+            decrypt_chacha20_poly1305_v1(pk1(), &individual_secrets, cyphertext, nonce).unwrap();
+        assert_eq!(content, Content::Bip380);
+        assert_eq!(String::from_utf8(decrypted).unwrap(), "test".to_string());
     }
 
     #[test]
@@ -1743,6 +1872,7 @@ mod encrypted_backup {
                 keys,
                 v.plaintext.as_bytes(),
                 nonce,
+                Padding::None,
             )
             .unwrap();
             v.expected = hex::encode(&encrypted);
@@ -1796,6 +1926,7 @@ mod encrypted_backup {
                 keys.clone(),
                 plaintext.as_bytes(),
                 nonce,
+                Padding::None,
             )
             .expect(description);
 

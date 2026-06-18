@@ -6,7 +6,7 @@ use core::str::FromStr;
 
 use descriptor::descr_to_dpks;
 
-pub use ll::Content;
+pub use ll::{Content, Padding};
 use miniscript::{
     bitcoin::{bip32::DerivationPath, secp256k1},
     Descriptor, DescriptorPublicKey,
@@ -157,6 +157,7 @@ pub struct EncryptedBackup {
     keys: Vec<secp256k1::PublicKey>,
     payload: Payload,
     warnings: Vec<Warning>,
+    padding: Padding,
 }
 
 impl Default for EncryptedBackup {
@@ -169,6 +170,7 @@ impl Default for EncryptedBackup {
             keys: vec![],
             payload: Payload::None,
             warnings: vec![],
+            padding: Padding::None,
         }
     }
 }
@@ -206,6 +208,13 @@ impl EncryptedBackup {
     }
     pub fn set_encryption(mut self, encryption: Encryption) -> Self {
         self.encryption = encryption;
+        self
+    }
+    pub fn get_padding(&self) -> Padding {
+        self.padding
+    }
+    pub fn set_padding(mut self, padding: Padding) -> Self {
+        self.padding = padding;
         self
     }
     pub fn set_derivation_paths(mut self, derivation_paths: Vec<DerivationPath>) -> Self {
@@ -255,6 +264,7 @@ impl EncryptedBackup {
                     self.content.clone(),
                     self.keys,
                     &bytes,
+                    self.padding,
                     #[cfg(not(feature = "rand"))]
                     nonce,
                 )?;
@@ -523,6 +533,41 @@ mod tests {
             .decrypt()
             .unwrap();
         assert_eq!(restored, Decrypted::Descriptor(descriptor));
+    }
+
+    #[test]
+    fn test_padding_is_payload_only() {
+        // Padding never changes the Encryption value: the byte stays 0x01 and
+        // the ciphertext size only reveals the bucket, not the real size.
+        let descriptor = descriptor::tests::descr_1();
+        let backp = EncryptedBackup::new()
+            .set_payload(&descriptor)
+            .unwrap()
+            .set_padding(Padding::Geometric);
+        assert_eq!(backp.get_padding(), Padding::Geometric);
+        let keys = backp.get_keys();
+        let bytes = backp.encrypt().unwrap().bytes;
+
+        let (_, _, encryption_type, _, cyphertext) = ll::decode_v1(&bytes).unwrap();
+        assert_eq!(encryption_type, 0x01);
+        assert_eq!(cyphertext.len(), ll::PADDING_MIN_SIZE + 16);
+
+        let restored = EncryptedBackup::new()
+            .set_encrypted_payload(&bytes)
+            .unwrap()
+            .set_keys(keys)
+            .decrypt()
+            .unwrap();
+        assert_eq!(restored, Decrypted::Descriptor(descriptor.clone()));
+
+        // The default (no padding) stays small and round-trips identically.
+        let small = EncryptedBackup::new()
+            .set_payload(&descriptor)
+            .unwrap()
+            .encrypt()
+            .unwrap()
+            .bytes;
+        assert!(small.len() < ll::PADDING_MIN_SIZE);
     }
 
     #[test]
