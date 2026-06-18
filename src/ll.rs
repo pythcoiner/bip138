@@ -1647,7 +1647,7 @@ mod encryption_secret {
                 .collect();
         }
         let out = serde_json::to_string_pretty(&vectors).unwrap();
-        std::fs::write("test_vectors/encryption_secret.json", out).unwrap();
+        std::fs::write("test_vectors/encryption_secret.json", out + "\n").unwrap();
     }
 
     #[test]
@@ -1772,7 +1772,7 @@ mod encryption_vectors {
                 .map(|(_, ct)| hex::encode(ct));
         }
         let out = serde_json::to_string_pretty(&vectors).unwrap();
-        std::fs::write("test_vectors/chacha20poly1305_encryption.json", out).unwrap();
+        std::fs::write("test_vectors/chacha20poly1305_encryption.json", out + "\n").unwrap();
     }
 
     #[test]
@@ -1904,7 +1904,7 @@ mod encrypted_backup {
             }
         }
         let out = serde_json::to_string_pretty(&vectors).unwrap();
-        std::fs::write("test_vectors/encrypted_backup.json", out).unwrap();
+        std::fs::write("test_vectors/encrypted_backup.json", out + "\n").unwrap();
     }
 
     #[test]

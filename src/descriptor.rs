@@ -421,6 +421,6 @@ mod keys_types {
                 .map(|pk| hex::encode(pk.x_only_public_key().0.serialize()));
         }
         let out = serde_json::to_string_pretty(&vectors).unwrap();
-        std::fs::write("test_vectors/keys_types.json", out).unwrap();
+        std::fs::write("test_vectors/keys_types.json", out + "\n").unwrap();
     }
 }
