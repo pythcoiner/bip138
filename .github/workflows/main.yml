@@ -19,10 +19,8 @@ jobs:
         with:
           toolchain: 1.85.0
           components: rustfmt, clippy
-      - name: rustfmt
-        run: cargo fmt -- --check
-      - name: clippy
-        run: cargo clippy --all-targets -- -D warnings
+      - name: lint
+        run: ./contrib/lint.sh
 
   tests:
     needs: linter
@@ -40,7 +38,7 @@ jobs:
         with:
           toolchain: ${{ matrix.toolchain }}
       - name: tests
-        run: cargo test --verbose --color always -- --nocapture
+        run: ./contrib/test.sh
   build:
     needs: tests
     strategy:
@@ -56,9 +54,7 @@ jobs:
         with:
           toolchain: ${{ matrix.toolchain }}
       - name: build
-        run: cargo build --release --features "cli miniscript_latest"
-      - name: build
-        run: cargo build --release --no-default-features --features "miniscript_12_0"
+        run: ./contrib/build.sh
   build_wasm:
     needs: tests
     strategy:
@@ -74,4 +70,4 @@ jobs:
         with:
           toolchain: ${{ matrix.toolchain }}
       - name: build
-        run: rustup target add wasm32-unknown-unknown && rustup target add wasm32-wasip1 && cargo build --target wasm32-unknown-unknown --no-default-features --features "miniscript_latest"
+        run: ./contrib/build-wasm.sh
