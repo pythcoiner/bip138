@@ -339,9 +339,11 @@ impl EncryptedBackup {
                     .map_err(|_| Error::Descriptor)?;
                 Ok(Decrypted::Descriptor(descriptor))
             }
-            Content::BIP(_) | Content::Proprietary(_) | Content::Bip329 | Content::Bip388 => {
-                Err(Error::NotImplemented)
-            }
+            Content::BIP(_)
+            | Content::Proprietary(_)
+            | Content::Bip139
+            | Content::Bip329
+            | Content::Bip388 => Err(Error::NotImplemented),
         }
     }
     pub fn decrypt(&self) -> Result<Decrypted, Error> {
