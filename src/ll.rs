@@ -4,8 +4,7 @@ pub use mscript_12_0 as miniscript;
 pub use mscript_12_3_5 as miniscript;
 
 extern crate alloc;
-use alloc::collections::BTreeSet;
-use alloc::{vec, vec::Vec};
+use alloc::{collections::BTreeSet, vec, vec::Vec};
 
 use chacha20poly1305::{
     aead::{Aead, KeyInit},

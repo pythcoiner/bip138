@@ -3,21 +3,18 @@ pub use mscript_12_0 as miniscript;
 #[cfg(feature = "miniscript_12_3_5")]
 pub use mscript_12_3_5 as miniscript;
 
-use clap::Parser;
-use clap::Subcommand;
+use clap::{Parser, Subcommand};
 
-use bip138::Decrypted;
-use bip138::EncryptedBackup;
-use miniscript::descriptor::DescriptorKeyParseError;
-use miniscript::Descriptor;
-use miniscript::DescriptorPublicKey;
+use bip138::{Decrypted, EncryptedBackup};
+use miniscript::{descriptor::DescriptorKeyParseError, Descriptor, DescriptorPublicKey};
 
-use std::env;
-use std::fs;
-use std::fs::File;
-use std::io::Write;
-use std::path::PathBuf;
-use std::str::FromStr;
+use std::{
+    env,
+    fs::{self, File},
+    io::Write,
+    path::PathBuf,
+    str::FromStr,
+};
 
 #[derive(Parser, Debug)]
 #[command(version, about)]
