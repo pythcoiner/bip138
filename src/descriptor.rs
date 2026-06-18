@@ -53,7 +53,7 @@ pub fn dpk_to_pk(key: &DescriptorPublicKey) -> Result<bitcoin::secp256k1::Public
         .ok_or(Error::InvalidKeyExpression)
 }
 
-fn dpk_to_deriv_path(key: &DescriptorPublicKey) -> Option<DerivationPath> {
+pub(crate) fn dpk_to_deriv_path(key: &DescriptorPublicKey) -> Option<DerivationPath> {
     match key {
         DescriptorPublicKey::Single(key) => key.origin.clone().map(|(_, p)| p),
         DescriptorPublicKey::XPub(key) => key.origin.clone().map(|(_, p)| p),

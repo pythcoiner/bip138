@@ -16,6 +16,8 @@ use crate::miniscript::{
 #[cfg(feature = "descriptor_backup")]
 pub use descriptor_backup::{parse_descriptor_backup, DescriptorBackup, DescriptorSet};
 pub use ll::{Content, Padding};
+#[cfg(feature = "descriptor_backup")]
+pub use policy_backup::{parse_policy_backup, PolicyBackup, PolicySet};
 
 #[cfg(feature = "tokio")]
 pub use tokio;
@@ -25,6 +27,8 @@ pub mod descriptor;
 pub mod descriptor_backup;
 pub mod ll;
 pub mod miniscript;
+#[cfg(feature = "descriptor_backup")]
+pub mod policy_backup;
 #[cfg(feature = "devices")]
 pub mod signing_devices;
 
@@ -116,6 +120,8 @@ pub enum Decrypted {
     Descriptor(Box<Descriptor<DescriptorPublicKey>>),
     #[cfg(feature = "descriptor_backup")]
     DescriptorBackup(Box<DescriptorBackup>),
+    #[cfg(feature = "descriptor_backup")]
+    PolicyBackup(Box<PolicyBackup>),
     Policy,
     Labels,
     WalletBackup(Vec<u8>),
@@ -349,11 +355,20 @@ impl EncryptedBackup {
                     Err(_) => Err(Error::Descriptor),
                 }
             }
-            Content::BIP(_)
-            | Content::Proprietary(_)
-            | Content::Bip139
-            | Content::Bip329
-            | Content::Bip388 => Err(Error::NotImplemented),
+            Content::Bip388 => {
+                #[cfg(feature = "descriptor_backup")]
+                {
+                    let backup = policy_backup::parse_policy_backup(&bytes)?;
+                    Ok(Decrypted::PolicyBackup(Box::new(backup)))
+                }
+                #[cfg(not(feature = "descriptor_backup"))]
+                {
+                    Err(Error::NotImplemented)
+                }
+            }
+            Content::BIP(_) | Content::Proprietary(_) | Content::Bip139 | Content::Bip329 => {
+                Err(Error::NotImplemented)
+            }
         }
     }
     pub fn decrypt(&self) -> Result<Decrypted, Error> {
@@ -1310,6 +1325,74 @@ mod descriptor_backup_roundtrip {
                 range: Some((0, 999)),
                 birth_time: Some(1710000000),
             }],
+        };
+        roundtrip(backup);
+    }
+}
+
+#[cfg(all(test, feature = "rand", feature = "descriptor_backup"))]
+mod policy_backup_roundtrip {
+    use super::*;
+    use crate::policy_backup::{PolicyBackup, PolicySet};
+    use alloc::string::ToString;
+
+    const KEY0: &str = "[6738736c/48'/0'/0'/2']xpub6FC1fXFP1GXLX5TKtcjHGT4q89SDRehkQLtbKJ2PzWcvbBHtyDsJPLtpLtkGqYNYZdVVAjRQ5kug9CsapegmmeRutpP7PW4u4wVF9JfkDhw";
+    const KEY1: &str = "[b2b1f0cf/48'/0'/0'/2']xpub6EWhjpPa6FqrcaPBuGBZRJVjzGJ1ZsMygRF26RwN932Vfkn1gyCiTbECVitBjRCkexEvetLdiqzTcYimmzYxyR1BZ79KNevgt61PDcukmC7";
+    const KEY_PKH: &str = "[d34db33f/44'/0'/0']xpub6ERApfZwUNrhLCkDtcHTcxd75RbzS1ed54G1LkBUHQVHQKqhMkhgbmJbZRkrgZw4koxb5JaHWkY4ALHY2grBGRjaDMzQLcgJvLJuZZvRcEL";
+
+    fn key(s: &str) -> DescriptorPublicKey {
+        DescriptorPublicKey::from_str(s).unwrap()
+    }
+
+    fn roundtrip(backup: PolicyBackup) {
+        let backp = EncryptedBackup::new().set_payload(&backup).unwrap();
+        let keys = backp.get_keys();
+        assert!(!keys.is_empty());
+        let bytes = backp.encrypt().unwrap().bytes;
+        let restored = EncryptedBackup::new()
+            .set_encrypted_payload(&bytes)
+            .unwrap()
+            .set_keys(keys)
+            .decrypt()
+            .unwrap();
+        assert_eq!(restored, Decrypted::PolicyBackup(Box::new(backup)));
+    }
+
+    #[test]
+    fn single_policy_roundtrip() {
+        let backup = PolicyBackup {
+            version: 1,
+            policy_sets: vec![PolicySet {
+                keys: vec![key(KEY_PKH)],
+                policy: "pkh(@0/**)".to_string(),
+                archived: false,
+                range: None,
+                birth_time: None,
+            }],
+        };
+        roundtrip(backup);
+    }
+
+    #[test]
+    fn multiple_policy_roundtrip() {
+        let backup = PolicyBackup {
+            version: 1,
+            policy_sets: vec![
+                PolicySet {
+                    keys: vec![key(KEY0), key(KEY1)],
+                    policy: "wsh(sortedmulti(2,@0/**,@1/**))".to_string(),
+                    archived: true,
+                    range: Some((0, 999)),
+                    birth_time: Some(1710000000),
+                },
+                PolicySet {
+                    keys: vec![key(KEY_PKH)],
+                    policy: "pkh(@0/**)".to_string(),
+                    archived: false,
+                    range: None,
+                    birth_time: None,
+                },
+            ],
         };
         roundtrip(backup);
     }

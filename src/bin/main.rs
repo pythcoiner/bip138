@@ -234,6 +234,9 @@ async fn main() -> Result<(), CliError> {
                 Decrypted::DescriptorBackup(backup) => {
                     backup.to_payload().map_err(CliError::FailedToDecrypt)?
                 }
+                Decrypted::PolicyBackup(backup) => {
+                    backup.to_payload().map_err(CliError::FailedToDecrypt)?
+                }
                 _ => return Err(CliError::Content),
             };
             fs::write(&output_path, &document).map_err(CliError::WriteError)?;
