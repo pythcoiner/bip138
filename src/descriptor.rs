@@ -5,7 +5,7 @@ pub use mscript_12_3_5 as miniscript;
 
 extern crate alloc;
 
-use alloc::{collections::BTreeSet, str::FromStr, vec::Vec};
+use alloc::{collections::BTreeSet, str::FromStr, vec, vec::Vec};
 
 use miniscript::{
     bitcoin::{self, bip32::DerivationPath, secp256k1},
