@@ -115,7 +115,7 @@ impl ToPayload for Descriptor<DescriptorPublicKey> {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Decrypted {
-    Descriptor(Descriptor<DescriptorPublicKey>),
+    Descriptor(Box<Descriptor<DescriptorPublicKey>>),
     Policy,
     Labels,
     WalletBackup(Vec<u8>),
@@ -337,7 +337,7 @@ impl EncryptedBackup {
                 let descr_str = String::from_utf8(bytes).map_err(|_| Error::Utf8)?;
                 let descriptor = Descriptor::<DescriptorPublicKey>::from_str(&descr_str)
                     .map_err(|_| Error::Descriptor)?;
-                Ok(Decrypted::Descriptor(descriptor))
+                Ok(Decrypted::Descriptor(Box::new(descriptor)))
             }
             Content::BIP(_)
             | Content::Proprietary(_)
@@ -400,7 +400,7 @@ impl EncryptedBackup {
                 _ => Error::WrongPayload,
             })?;
         Ok(match res {
-            v0::Decrypted::Descriptor(d) => Decrypted::Descriptor(d),
+            v0::Decrypted::Descriptor(d) => Decrypted::Descriptor(Box::new(d)),
             v0::Decrypted::Policy => Decrypted::Policy,
             v0::Decrypted::Labels => Decrypted::Labels,
             v0::Decrypted::WalletBackup(b) => Decrypted::WalletBackup(b),
@@ -534,7 +534,7 @@ mod tests {
             .set_keys(keys)
             .decrypt()
             .unwrap();
-        assert_eq!(restored, Decrypted::Descriptor(descriptor));
+        assert_eq!(restored, Decrypted::Descriptor(Box::new(descriptor)));
     }
 
     #[test]
@@ -560,7 +560,10 @@ mod tests {
             .set_keys(keys)
             .decrypt()
             .unwrap();
-        assert_eq!(restored, Decrypted::Descriptor(descriptor.clone()));
+        assert_eq!(
+            restored,
+            Decrypted::Descriptor(Box::new(descriptor.clone()))
+        );
 
         // The default (no padding) stays small and round-trips identically.
         let small = EncryptedBackup::new()
@@ -754,7 +757,7 @@ mod tests {
                 .set_keys(vec![key])
                 .decrypt()
                 .unwrap_err();
-            assert_eq!(err, Error::Descriptor, "key {:?} failed decrypt", key);
+            assert_eq!(err, Error::Descriptor, "key {key:?} failed decrypt");
         }
 
         let fail = EncryptedBackup::new()
@@ -902,7 +905,7 @@ mod tests {
             .set_keys(keys)
             .decrypt()
             .unwrap();
-        assert_eq!(restored, Decrypted::Descriptor(descriptor));
+        assert_eq!(restored, Decrypted::Descriptor(Box::new(descriptor)));
     }
 
     #[test]
@@ -922,7 +925,7 @@ mod tests {
             .set_keys(keys)
             .decrypt()
             .unwrap();
-        assert_eq!(restored, Decrypted::Descriptor(descriptor));
+        assert_eq!(restored, Decrypted::Descriptor(Box::new(descriptor)));
     }
 
     #[test]
@@ -998,7 +1001,7 @@ mod tests {
             .set_keys(keys)
             .decrypt()
             .unwrap();
-        assert_eq!(restored, Decrypted::Descriptor(descriptor));
+        assert_eq!(restored, Decrypted::Descriptor(Box::new(descriptor)));
     }
 
     #[test]
@@ -1020,7 +1023,7 @@ mod tests {
             .set_keys(keys)
             .decrypt()
             .unwrap();
-        assert_eq!(restored, Decrypted::Descriptor(descriptor));
+        assert_eq!(restored, Decrypted::Descriptor(Box::new(descriptor)));
     }
 
     #[test]
@@ -1031,7 +1034,7 @@ mod tests {
         // the filtered key cannot decrypt; only the valid key works.
         let valid_xpub = "[58b7f8dc/48'/1'/0'/2']tpubDEPBvXvhta3pjVaKokqC3eeMQnszj9ehFaA2zD5nSdkaccwGAizu8jVB2NeSpvmP2P52MBoZvNCixqXRJnTyXx51FQzARR63tjxQSyP3Btw/<0;1>/*";
         let bare_xpub = "tpubDC5FSnBiZDMmkoat4aZFfbJdEthnPqJ1jXZcKWJNKC4yJanLA55dRW5qKJRRvAo1SwaXeUx2ayUQyVJ6eCbABbBB8Wn3T7dAuVJRnZgntVC";
-        let descr_str = format!("wsh(or_d(pk({}),pk({})))", valid_xpub, bare_xpub);
+        let descr_str = format!("wsh(or_d(pk({valid_xpub}),pk({bare_xpub})))");
         let descriptor = Descriptor::<DescriptorPublicKey>::from_str(&descr_str).unwrap();
 
         let backp = EncryptedBackup::new().set_payload(&descriptor).unwrap();
@@ -1051,7 +1054,7 @@ mod tests {
             .set_keys(keys)
             .decrypt()
             .unwrap();
-        assert_eq!(restored, Decrypted::Descriptor(descriptor));
+        assert_eq!(restored, Decrypted::Descriptor(Box::new(descriptor)));
 
         // The filtered (bare) key does NOT decrypt; its pubkey was excluded
         // from the encryption-key set.
@@ -1224,7 +1227,7 @@ mod v0_tests {
             .unwrap()
             .get_keys();
         let restored = backp.set_keys(keys).decrypt().unwrap();
-        assert_eq!(restored, Decrypted::Descriptor(descriptor));
+        assert_eq!(restored, Decrypted::Descriptor(Box::new(descriptor)));
     }
 
     #[test]
@@ -1293,7 +1296,7 @@ mod v0_tests {
             .set_keys(keys)
             .decrypt()
             .unwrap();
-        assert_eq!(restored, Decrypted::Descriptor(descriptor));
+        assert_eq!(restored, Decrypted::Descriptor(Box::new(descriptor)));
     }
 
     #[test]

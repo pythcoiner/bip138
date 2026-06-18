@@ -58,14 +58,14 @@ pub async fn list(network: Network) -> Result<Vec<Box<dyn HWI + Send>>, Box<dyn 
     }
 
     match Jade::enumerate().await {
-        Err(e) => println!("{:?}", e),
+        Err(e) => println!("{e:?}"),
         Ok(devices) => {
             for device in devices {
                 let device = device.with_network(network);
                 if let Ok(info) = device.get_info().await {
                     if info.jade_state == jade::api::JadeState::Locked {
                         if let Err(e) = device.auth().await {
-                            eprintln!("auth {:?}", e);
+                            eprintln!("auth {e:?}");
                             continue;
                         }
                     }
