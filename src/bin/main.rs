@@ -1,7 +1,4 @@
-#[cfg(feature = "miniscript_12_0")]
-pub use mscript_12_0 as miniscript;
-#[cfg(feature = "miniscript_12_3_5")]
-pub use mscript_12_3_5 as miniscript;
+use bip138::miniscript;
 
 use clap::{Parser, Subcommand};
 

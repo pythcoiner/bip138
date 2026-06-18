@@ -1,13 +1,8 @@
-#[cfg(feature = "miniscript_12_0")]
-pub use mscript_12_0 as miniscript;
-#[cfg(feature = "miniscript_12_3_5")]
-pub use mscript_12_3_5 as miniscript;
-
 extern crate alloc;
 
 use alloc::{collections::BTreeSet, str::FromStr, vec, vec::Vec};
 
-use miniscript::{
+use crate::miniscript::{
     bitcoin::{self, bip32::DerivationPath, secp256k1},
     descriptor::{DerivPaths, SinglePubKey, Wildcard},
     Descriptor, DescriptorPublicKey, ForEachKey,
@@ -145,7 +140,7 @@ pub mod tests {
     use super::*;
     use alloc::{str::FromStr, vec};
 
-    use miniscript::{
+    use crate::miniscript::{
         bitcoin::bip32::{self, ChainCode, ChildNumber, Fingerprint},
         descriptor::{
             self, DerivPaths, DescriptorMultiXKey, DescriptorXKey, SinglePub, SinglePubKey,

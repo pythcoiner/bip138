@@ -1,21 +1,16 @@
-#[cfg(feature = "miniscript_12_0")]
-pub use mscript_12_0 as miniscript;
-#[cfg(feature = "miniscript_12_3_5")]
-pub use mscript_12_3_5 as miniscript;
-
 extern crate alloc;
 use alloc::{collections::BTreeSet, vec, vec::Vec};
 
-use chacha20poly1305::{
-    aead::{Aead, KeyInit},
-    ChaCha20Poly1305, Key, Nonce,
-};
-use miniscript::bitcoin::{
+use crate::miniscript::bitcoin::{
     self,
     bip32::{ChildNumber, DerivationPath},
     hashes::{sha256, Hash, HashEngine},
     secp256k1::{self, constants::SCHNORR_PUBLIC_KEY_SIZE},
     VarInt,
+};
+use chacha20poly1305::{
+    aead::{Aead, KeyInit},
+    ChaCha20Poly1305, Key, Nonce,
 };
 #[cfg(feature = "rand")]
 use rand::{rngs::OsRng, TryRngCore};
@@ -796,9 +791,9 @@ fn parse_varint(bytes: &[u8]) -> Option<(VarInt, usize)> {
 
 #[cfg(all(test, feature = "rand"))]
 mod tests {
+    use crate::miniscript::bitcoin::XOnlyPublicKey;
     use alloc::string::{String, ToString};
     use core::str::FromStr;
-    use miniscript::bitcoin::XOnlyPublicKey;
     use rand::random;
 
     use super::*;
@@ -1494,9 +1489,9 @@ mod tests {
 #[cfg(all(test, feature = "rand"))]
 mod derivation_paths {
     use super::*;
+    use crate::miniscript::bitcoin::bip32::DerivationPath;
     use alloc::{string::String, vec::Vec};
     use core::str::FromStr;
-    use miniscript::bitcoin::bip32::DerivationPath;
 
     const TEST_VECTORS_JSON: &str = include_str!("../test_vectors/derivation_path.json");
 

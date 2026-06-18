@@ -1,3 +1,8 @@
+use crate::miniscript::{
+    bitcoin::{bip32::DerivationPath, Network},
+    descriptor::{DescriptorXKey, Wildcard},
+    DescriptorPublicKey,
+};
 use async_hwi::{
     bitbox::{api::runtime, BitBox02, PairingBitbox02WithLocalCache},
     coldcard,
@@ -6,15 +11,6 @@ use async_hwi::{
     specter::{Specter, SpecterSimulator},
     HWI,
 };
-use miniscript::{
-    bitcoin::{bip32::DerivationPath, Network},
-    descriptor::{DescriptorXKey, Wildcard},
-    DescriptorPublicKey,
-};
-#[cfg(feature = "miniscript_12_0")]
-pub use mscript_12_0 as miniscript;
-#[cfg(feature = "miniscript_12_3_5")]
-pub use mscript_12_3_5 as miniscript;
 use std::{collections::BTreeSet, error::Error};
 
 pub async fn collect_xpubs(deriv_paths: Vec<DerivationPath>) -> Vec<DescriptorPublicKey> {

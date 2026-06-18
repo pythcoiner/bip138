@@ -6,27 +6,18 @@ use core::str::FromStr;
 
 use descriptor::descr_to_dpks;
 
-pub use ll::{Content, Padding};
-use miniscript::{
+use crate::miniscript::{
     bitcoin::{bip32::DerivationPath, secp256k1},
     Descriptor, DescriptorPublicKey,
 };
+pub use ll::{Content, Padding};
 
-#[cfg(all(feature = "miniscript_12_0", feature = "miniscript_12_3_5"))]
-compile_error!("A single miniscript version must be selected");
-
-#[cfg(not(any(feature = "miniscript_12_0", feature = "miniscript_12_3_5")))]
-compile_error!("A miniscript version must be selected with feature flag");
 #[cfg(feature = "tokio")]
 pub use tokio;
 
-#[cfg(feature = "miniscript_12_0")]
-pub use mscript_12_0 as miniscript;
-#[cfg(feature = "miniscript_12_3_5")]
-pub use mscript_12_3_5 as miniscript;
-
 pub mod descriptor;
 pub mod ll;
+pub mod miniscript;
 #[cfg(feature = "devices")]
 pub mod signing_devices;
 
@@ -516,7 +507,7 @@ impl From<ll::Error> for Error {
 
 #[cfg(all(test, feature = "rand"))]
 mod tests {
-    use miniscript::bitcoin;
+    use crate::miniscript::bitcoin;
 
     use crate::descriptor::dpk_to_pk;
 
@@ -861,7 +852,7 @@ mod tests {
 
     #[test]
     fn test_single_sig_individual_secret_is_non_zero() {
-        use miniscript::bitcoin::hashes::Hash;
+        use crate::miniscript::bitcoin::hashes::Hash;
         // Direct math check: with a single key, s and s_1 use different tags,
         // so their XOR cannot be all-zero in any practical sense.
         let xonly = dpk_to_pk(&descriptor::tests::dpk_1())
@@ -1189,8 +1180,8 @@ mod tests {
 mod v0_tests {
     use super::*;
     use crate::descriptor::dpk_to_pk;
+    use crate::miniscript::bitcoin;
     use bitcoin_encrypted_backup_v0 as v0;
-    use miniscript::bitcoin;
 
     // The v0 dep is built with default-features = false, so its
     // `encrypt(nonce)` signature requires a fixed nonce.
