@@ -229,12 +229,12 @@ async fn main() -> Result<(), CliError> {
                 .decrypt()
                 .map_err(CliError::FailedToDecrypt)?;
 
-            let document = match decrypted {
-                Decrypted::Descriptor(descr) => descr.to_string().into_bytes(),
-                Decrypted::DescriptorBackup(backup) => {
+            let document = match decrypted.into_iter().next() {
+                Some(Decrypted::Descriptor(descr)) => descr.to_string().into_bytes(),
+                Some(Decrypted::DescriptorBackup(backup)) => {
                     backup.to_payload().map_err(CliError::FailedToDecrypt)?
                 }
-                Decrypted::PolicyBackup(backup) => {
+                Some(Decrypted::PolicyBackup(backup)) => {
                     backup.to_payload().map_err(CliError::FailedToDecrypt)?
                 }
                 _ => return Err(CliError::Content),

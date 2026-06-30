@@ -373,13 +373,13 @@ impl EncryptedBackup {
             }
         }
     }
-    pub fn decrypt(&self) -> Result<Decrypted, Error> {
+    pub fn decrypt(&self) -> Result<Vec<Decrypted>, Error> {
         if self.keys.is_empty() {
             return Err(Error::NoKey);
         }
         #[cfg(feature = "v0")]
         if let Payload::DecryptV0 { raw } = &self.payload {
-            return self.try_v0_decrypt(raw);
+            return self.try_v0_decrypt(raw).map(|d| vec![d]);
         }
         match self.version {
             Version::V1 => match &self.payload {
@@ -393,13 +393,16 @@ impl EncryptedBackup {
                         return Err(Error::UnsupportedEncryption);
                     }
                     for key in &self.keys {
-                        if let Ok((content, bytes)) = ll::decrypt_chacha20_poly1305_v1(
+                        if let Ok(items) = ll::decrypt_chacha20_poly1305_v1(
                             *key,
                             &individual_secrets.clone(),
                             cyphertext.clone(),
                             *nonce,
                         ) {
-                            return Self::extract(content, bytes);
+                            return items
+                                .into_iter()
+                                .map(|(content, bytes)| Self::extract(content, bytes))
+                                .collect();
                         }
                     }
                     Err(Error::WrongKey)
@@ -573,7 +576,7 @@ mod tests {
             .set_keys(keys)
             .decrypt()
             .unwrap();
-        assert_eq!(restored, Decrypted::Descriptor(Box::new(descriptor)));
+        assert_eq!(restored, vec![Decrypted::Descriptor(Box::new(descriptor))]);
     }
 
     #[test]
@@ -601,7 +604,7 @@ mod tests {
             .unwrap();
         assert_eq!(
             restored,
-            Decrypted::Descriptor(Box::new(descriptor.clone()))
+            vec![Decrypted::Descriptor(Box::new(descriptor.clone()))]
         );
 
         // The default (no padding) stays small and round-trips identically.
@@ -977,7 +980,7 @@ mod tests {
             .set_keys(keys)
             .decrypt()
             .unwrap();
-        assert_eq!(restored, Decrypted::Descriptor(Box::new(descriptor)));
+        assert_eq!(restored, vec![Decrypted::Descriptor(Box::new(descriptor))]);
     }
 
     #[test]
@@ -997,7 +1000,7 @@ mod tests {
             .set_keys(keys)
             .decrypt()
             .unwrap();
-        assert_eq!(restored, Decrypted::Descriptor(Box::new(descriptor)));
+        assert_eq!(restored, vec![Decrypted::Descriptor(Box::new(descriptor))]);
     }
 
     #[test]
@@ -1073,7 +1076,7 @@ mod tests {
             .set_keys(keys)
             .decrypt()
             .unwrap();
-        assert_eq!(restored, Decrypted::Descriptor(Box::new(descriptor)));
+        assert_eq!(restored, vec![Decrypted::Descriptor(Box::new(descriptor))]);
     }
 
     #[test]
@@ -1095,7 +1098,7 @@ mod tests {
             .set_keys(keys)
             .decrypt()
             .unwrap();
-        assert_eq!(restored, Decrypted::Descriptor(Box::new(descriptor)));
+        assert_eq!(restored, vec![Decrypted::Descriptor(Box::new(descriptor))]);
     }
 
     #[test]
@@ -1126,7 +1129,7 @@ mod tests {
             .set_keys(keys)
             .decrypt()
             .unwrap();
-        assert_eq!(restored, Decrypted::Descriptor(Box::new(descriptor)));
+        assert_eq!(restored, vec![Decrypted::Descriptor(Box::new(descriptor))]);
 
         // The filtered (bare) key does NOT decrypt; its pubkey was excluded
         // from the encryption-key set.
@@ -1281,7 +1284,10 @@ mod descriptor_backup_roundtrip {
             .set_keys(keys)
             .decrypt()
             .unwrap();
-        assert_eq!(restored, Decrypted::DescriptorBackup(Box::new(backup)));
+        assert_eq!(
+            restored,
+            vec![Decrypted::DescriptorBackup(Box::new(backup))]
+        );
     }
 
     #[test]
@@ -1298,7 +1304,7 @@ mod descriptor_backup_roundtrip {
             .set_keys(keys)
             .decrypt()
             .unwrap();
-        assert_eq!(restored, Decrypted::Descriptor(Box::new(descriptor)));
+        assert_eq!(restored, vec![Decrypted::Descriptor(Box::new(descriptor))]);
     }
 
     #[test]
@@ -1359,7 +1365,7 @@ mod policy_backup_roundtrip {
             .set_keys(keys)
             .decrypt()
             .unwrap();
-        assert_eq!(restored, Decrypted::PolicyBackup(Box::new(backup)));
+        assert_eq!(restored, vec![Decrypted::PolicyBackup(Box::new(backup))]);
     }
 
     #[test]
@@ -1444,7 +1450,7 @@ mod v0_tests {
             .unwrap()
             .get_keys();
         let restored = backp.set_keys(keys).decrypt().unwrap();
-        assert_eq!(restored, Decrypted::Descriptor(Box::new(descriptor)));
+        assert_eq!(restored, vec![Decrypted::Descriptor(Box::new(descriptor))]);
     }
 
     #[test]
@@ -1513,7 +1519,7 @@ mod v0_tests {
             .set_keys(keys)
             .decrypt()
             .unwrap();
-        assert_eq!(restored, Decrypted::Descriptor(Box::new(descriptor)));
+        assert_eq!(restored, vec![Decrypted::Descriptor(Box::new(descriptor))]);
     }
 
     #[test]

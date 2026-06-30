@@ -70,10 +70,15 @@ pub enum Content {
     Unknown,
 }
 
-// `CONTENT` is a variable length field defining the type of `PLAINTEXT` being encrypted,
-// it follows this format:
+// `CONTENT` is a variable length field defining the type of the `PLAINTEXT` that
+// follows it. It follows this format:
 //
 // `TYPE` (`LENGTH`) `DATA`
+//
+// A `PAYLOAD` carries one or more `CONTENT LENGTH PLAINTEXT` items, each `CONTENT`
+// describing the `PLAINTEXT` immediately following it. The sequence ends at the
+// first `TYPE` byte equal to `0x00` or at the end of the `PAYLOAD`; all remaining
+// bytes are `PADDING` and are ignored.
 //
 // `TYPE`: 1-byte unsigned integer identifying how to interpret `DATA`.
 //
@@ -321,36 +326,54 @@ fn geometric_bucket(len: usize) -> Result<usize, Error> {
     usize::try_from(target).map_err(|_| Error::Padding)
 }
 
-pub fn encode_plaintext(
-    content_metadata: Vec<u8>,
-    data: &[u8],
-    padding: Padding,
-) -> Result<Vec<u8>, Error> {
-    let mut payload = content_metadata;
-    let mut data_len = bitcoin::consensus::serialize(&bitcoin::VarInt(data.len() as u64));
-    payload.append(&mut data_len);
-    payload.append(&mut data.to_vec());
-
+/// Encode the decrypted payload as `(<CONTENT_METADATA><LENGTH><PLAINTEXT>)+ (<PADDING>)`.
+/// Each item is a `(content_metadata, plaintext)` pair. Zero-fill padding after the
+/// last item doubles as the `0x00` terminator that `decode_plaintext` stops at.
+pub fn encode_plaintext(items: &[(&[u8], &[u8])], padding: Padding) -> Result<Vec<u8>, Error> {
+    let mut payload = Vec::new();
+    for (content_metadata, data) in items {
+        payload.extend_from_slice(content_metadata);
+        let mut data_len = bitcoin::consensus::serialize(&bitcoin::VarInt(data.len() as u64));
+        payload.append(&mut data_len);
+        payload.extend_from_slice(data);
+    }
     let target = padding.padded_size(payload.len())?;
     payload.resize(target, 0u8);
     Ok(payload)
 }
 
-pub fn decode_plaintext(bytes: &[u8]) -> Result<(Content, Vec<u8>), Error> {
-    let mut offset = init_offset(bytes, 0)?;
-    // <CONTENT_METADATA>
-    let (incr, content) = parse_content(bytes)?;
-    offset = increment_offset(bytes, offset, incr)?;
-
-    // <LENGTH>
-    let (VarInt(data_len), incr) = parse_varint(&bytes[offset..]).ok_or(Error::DataLength)?;
-    offset = increment_offset(bytes, offset, incr)?;
-    let data_len = usize::try_from(data_len).map_err(|_| Error::DataLength)?;
-    check_offset_lookahead(offset, bytes, data_len)?;
-    let end = offset.checked_add(data_len).ok_or(Error::OffsetOverflow)?;
-
-    // bytes past DATA are padding/vendor data, ignored
-    Ok((content, bytes[offset..end].to_vec()))
+/// Decode the content items from a decrypted payload. The sequence ends at the first
+/// `0x00` `TYPE` byte (start of padding) or at the end of the payload.
+pub fn decode_plaintext(bytes: &[u8]) -> Result<Vec<(Content, Vec<u8>)>, Error> {
+    if bytes.is_empty() {
+        return Err(Error::EmptyBytes);
+    }
+    let mut items = Vec::new();
+    let mut offset = 0usize;
+    while offset < bytes.len() {
+        // A 0x00 TYPE byte marks the end of the content sequence; the rest is padding.
+        if bytes[offset] == CONTENT_RESERVED {
+            break;
+        }
+        // <CONTENT_METADATA>
+        let (incr, content) = parse_content(&bytes[offset..])?;
+        offset = offset.checked_add(incr).ok_or(Error::OffsetOverflow)?;
+        // <LENGTH>
+        let (VarInt(data_len), incr) = parse_varint(&bytes[offset..]).ok_or(Error::DataLength)?;
+        offset = offset.checked_add(incr).ok_or(Error::OffsetOverflow)?;
+        let data_len = usize::try_from(data_len).map_err(|_| Error::DataLength)?;
+        let end = offset.checked_add(data_len).ok_or(Error::OffsetOverflow)?;
+        if end > bytes.len() {
+            return Err(Error::Corrupted);
+        }
+        // <PLAINTEXT>
+        items.push((content, bytes[offset..end].to_vec()));
+        offset = end;
+    }
+    if items.is_empty() {
+        return Err(Error::EmptyBytes);
+    }
+    Ok(items)
 }
 
 /// Encode following this format:
@@ -536,6 +559,38 @@ fn encrypt_chacha20_poly1305_v1_with_nonce(
     nonce: [u8; 12],
     padding: Padding,
 ) -> Result<Vec<u8>, Error> {
+    // NOTE: RFC 8439 caps ChaCha20-Poly1305 plaintext at 2^38 - 64 bytes, but we
+    // limit it to u32::MAX so the length never exceeds usize::MAX on 32-bit
+    // architectures.
+    // https://datatracker.ietf.org/doc/html/rfc8439#section-2.8
+    if data.len() > u32::MAX as usize {
+        return Err(Error::DataLength);
+    }
+    if data.is_empty() {
+        return Err(Error::DataLength);
+    }
+
+    let content_metadata: Vec<u8> = content_metadata
+        .try_into()
+        .map_err(|_| Error::ContentMetadata)?;
+    if content_metadata.is_empty() {
+        return Err(Error::ContentMetadata);
+    }
+
+    // <PAYLOAD> = (<CONTENT_METADATA><LENGTH><PLAINTEXT>)+ (<PADDING>)
+    let payload = encode_plaintext(&[(&content_metadata, data)], padding)?;
+    encode_v1_backup(derivation_paths, keys, payload, nonce)
+}
+
+/// Assemble a V1 backup from an already-encoded `payload` (see `encode_plaintext`),
+/// the keys and the derivation paths. Content-agnostic: the payload may hold one or
+/// more content items.
+fn encode_v1_backup(
+    derivation_paths: Vec<DerivationPath>,
+    keys: Vec<secp256k1::PublicKey>,
+    payload: Vec<u8>,
+    nonce: [u8; 12],
+) -> Result<Vec<u8>, Error> {
     // drop duplicates keys and sort out bip341 nums
     let nums_xonly = bip341_nums().x_only_public_key().0;
     let keys = keys
@@ -556,23 +611,6 @@ fn encrypt_chacha20_poly1305_v1_with_nonce(
     if derivation_paths.len() > u8::MAX as usize {
         return Err(Error::DerivPathCount);
     }
-    // NOTE: RFC 8439 caps ChaCha20-Poly1305 plaintext at 2^38 - 64 bytes, but we
-    // limit it to u32::MAX so the length never exceeds usize::MAX on 32-bit
-    // architectures.
-    // https://datatracker.ietf.org/doc/html/rfc8439#section-2.8
-    if data.len() > u32::MAX as usize {
-        return Err(Error::DataLength);
-    }
-    if data.is_empty() {
-        return Err(Error::DataLength);
-    }
-
-    let content_metadata: Vec<u8> = content_metadata
-        .try_into()
-        .map_err(|_| Error::ContentMetadata)?;
-    if content_metadata.is_empty() {
-        return Err(Error::ContentMetadata);
-    }
 
     let raw_keys = keys
         .into_iter()
@@ -584,10 +622,7 @@ fn encrypt_chacha20_poly1305_v1_with_nonce(
         encode_individual_secrets(&individual_secrets(&secret, raw_keys.as_slice()))?;
     let derivation_paths = encode_derivation_paths(derivation_paths)?;
 
-    // <PAYLOAD> = <CONTENT_METADATA><LENGTH><DATA>(<PADDING>)
-    let payload = encode_plaintext(content_metadata, data, padding)?;
-
-    let (nonce, cyphertext) = encrypt_with_nonce(secret, payload.to_vec(), nonce)?;
+    let (nonce, cyphertext) = encrypt_with_nonce(secret, payload, nonce)?;
     let encrypted_payload = encode_encrypted_payload(nonce, cyphertext.as_slice())?;
 
     Ok(encode_v1(
@@ -635,7 +670,7 @@ pub fn decrypt_chacha20_poly1305_v1(
     individual_secrets: &Vec<[u8; 32]>,
     cyphertext: Vec<u8>,
     nonce: [u8; 12],
-) -> Result<(Content, Vec<u8>), Error> {
+) -> Result<Vec<(Content, Vec<u8>)>, Error> {
     let raw_key = key.x_only_public_key().0.serialize();
 
     let si = tagged_hash(INDIVIDUAL_SECRET.as_bytes(), &raw_key);
@@ -795,7 +830,6 @@ fn parse_varint(bytes: &[u8]) -> Option<(VarInt, usize)> {
 #[cfg(all(test, feature = "rand"))]
 mod tests {
     use crate::miniscript::bitcoin::XOnlyPublicKey;
-    use alloc::string::{String, ToString};
     use core::str::FromStr;
     use rand::random;
 
@@ -1104,19 +1138,53 @@ mod tests {
         let content_metadata: Vec<u8> = Content::Bip380.try_into().unwrap();
 
         // padded: payload grows to the bucket, decode still recovers the data
-        let padded =
-            encode_plaintext(content_metadata.clone(), b"test", Padding::Geometric).unwrap();
+        let padded = encode_plaintext(&[(&content_metadata, b"test")], Padding::Geometric).unwrap();
         assert_eq!(padded.len(), PADDING_MIN_SIZE);
-        let (content, data) = decode_plaintext(&padded).unwrap();
-        assert_eq!(content, Content::Bip380);
-        assert_eq!(data, b"test");
+        let items = decode_plaintext(&padded).unwrap();
+        assert_eq!(items, vec![(Content::Bip380, b"test".to_vec())]);
 
         // unpadded: <CONTENT_METADATA(3)><LENGTH(1)><DATA(4)>, no trailing bytes
-        let plain = encode_plaintext(content_metadata, b"test", Padding::None).unwrap();
+        let plain = encode_plaintext(&[(&content_metadata, b"test")], Padding::None).unwrap();
         assert_eq!(plain.len(), 3 + 1 + 4);
-        let (content, data) = decode_plaintext(&plain).unwrap();
-        assert_eq!(content, Content::Bip380);
-        assert_eq!(data, b"test");
+        let items = decode_plaintext(&plain).unwrap();
+        assert_eq!(items, vec![(Content::Bip380, b"test".to_vec())]);
+    }
+
+    #[test]
+    fn test_encode_decode_plaintext_multi_content() {
+        let meta_descr: Vec<u8> = Content::Bip380.try_into().unwrap();
+        let meta_labels: Vec<u8> = Content::Bip329.try_into().unwrap();
+        let items: &[(&[u8], &[u8])] = &[(&meta_descr, b"desc"), (&meta_labels, b"labels")];
+
+        // unpadded: both items round-trip, in order
+        let plain = encode_plaintext(items, Padding::None).unwrap();
+        let decoded = decode_plaintext(&plain).unwrap();
+        assert_eq!(
+            decoded,
+            vec![
+                (Content::Bip380, b"desc".to_vec()),
+                (Content::Bip329, b"labels".to_vec()),
+            ]
+        );
+
+        // padded: the zero-fill terminator stops the sequence after the last item
+        let padded = encode_plaintext(items, Padding::Geometric).unwrap();
+        assert_eq!(padded.len(), PADDING_MIN_SIZE);
+        let decoded = decode_plaintext(&padded).unwrap();
+        assert_eq!(
+            decoded,
+            vec![
+                (Content::Bip380, b"desc".to_vec()),
+                (Content::Bip329, b"labels".to_vec()),
+            ]
+        );
+    }
+
+    #[test]
+    fn test_decode_plaintext_rejects_empty() {
+        assert_eq!(decode_plaintext(&[]), Err(Error::EmptyBytes));
+        // a payload that is only padding holds no content items
+        assert_eq!(decode_plaintext(&[0u8; 8]), Err(Error::EmptyBytes));
     }
 
     #[test]
@@ -1396,16 +1464,14 @@ mod tests {
             decode_v1(&bytes).unwrap();
         assert_eq!(encryption_type, 0x01);
 
-        let (content, decrypted_1) =
+        let decrypted_1 =
             decrypt_chacha20_poly1305_v1(pk1(), &individual_secrets, cyphertext.clone(), nonce)
                 .unwrap();
-        assert_eq!(content, Content::Bip380);
-        assert_eq!(String::from_utf8(decrypted_1).unwrap(), "test".to_string());
-        let (content, decrypted_2) =
+        assert_eq!(decrypted_1, vec![(Content::Bip380, b"test".to_vec())]);
+        let decrypted_2 =
             decrypt_chacha20_poly1305_v1(pk2(), &individual_secrets, cyphertext.clone(), nonce)
                 .unwrap();
-        assert_eq!(content, Content::Bip380);
-        assert_eq!(String::from_utf8(decrypted_2).unwrap(), "test".to_string());
+        assert_eq!(decrypted_2, vec![(Content::Bip380, b"test".to_vec())]);
         let decrypted_3 =
             decrypt_chacha20_poly1305_v1(pk3(), &individual_secrets, cyphertext.clone(), nonce);
         assert!(decrypted_3.is_err());
@@ -1425,10 +1491,9 @@ mod tests {
         assert_eq!(encryption_type, 0x01);
         assert_eq!(cyphertext.len(), PADDING_MIN_SIZE + 16);
 
-        let (content, decrypted) =
+        let decrypted =
             decrypt_chacha20_poly1305_v1(pk1(), &individual_secrets, cyphertext, nonce).unwrap();
-        assert_eq!(content, Content::Bip380);
-        assert_eq!(String::from_utf8(decrypted).unwrap(), "test".to_string());
+        assert_eq!(decrypted, vec![(Content::Bip380, b"test".to_vec())]);
     }
 
     #[test]
@@ -1843,6 +1908,25 @@ mod encrypted_backup {
 
     const TEST_VECTORS_JSON: &str = include_str!("../test_vectors/encrypted_backup.json");
 
+    fn default_true() -> bool {
+        true
+    }
+    fn is_true(b: &bool) -> bool {
+        *b
+    }
+
+    // Nonzero nonce used only to build the all-zero-nonce rejection vector:
+    // encrypt with it, then overwrite the serialized nonce field with zeros.
+    const SENTINEL_NONCE: [u8; 12] = [
+        0xa1, 0xb2, 0xc3, 0xd4, 0xe5, 0xf6, 0x07, 0x18, 0x29, 0x3a, 0x4b, 0x5c,
+    ];
+
+    #[derive(serde::Deserialize, serde::Serialize)]
+    struct ContentItem {
+        content: String,
+        plaintext: String,
+    }
+
     #[derive(serde::Deserialize, serde::Serialize)]
     struct TestVector {
         description: String,
@@ -1854,6 +1938,14 @@ mod encrypted_backup {
         plaintext: String,
         nonce: String,
         expected: String,
+        /// `false` marks a backup that parsers MUST reject (e.g. an all-zero
+        /// nonce). Defaults to `true`.
+        #[serde(default = "default_true", skip_serializing_if = "is_true")]
+        valid: bool,
+        /// Additional content items packed into the same payload after the
+        /// primary `content`/`plaintext`, for multi-content backups.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        extra: Vec<ContentItem>,
         /// Optional hex of arbitrary bytes appended to `expected` before
         /// parsing. Parsers MUST ignore trailing bytes past the end of
         /// the self-delimited backup.
@@ -1868,13 +1960,32 @@ mod encrypted_backup {
         expected_base64: Option<String>,
     }
 
+    /// The serialized `(content_metadata, plaintext)` items a vector encodes:
+    /// the primary `content`/`plaintext` followed by any `extra` items.
+    fn vector_items(v: &TestVector) -> (Vec<Vec<u8>>, Vec<Vec<u8>>) {
+        let mut metas = vec![hex::decode(&v.content).expect(&v.description)];
+        let mut plaintexts = vec![v.plaintext.as_bytes().to_vec()];
+        for e in &v.extra {
+            metas.push(hex::decode(&e.content).expect(&v.description));
+            plaintexts.push(e.plaintext.as_bytes().to_vec());
+        }
+        (metas, plaintexts)
+    }
+
+    fn encode_payload(metas: &[Vec<u8>], plaintexts: &[Vec<u8>]) -> Vec<u8> {
+        let items: Vec<(&[u8], &[u8])> = metas
+            .iter()
+            .zip(plaintexts.iter())
+            .map(|(m, p)| (m.as_slice(), p.as_slice()))
+            .collect();
+        encode_plaintext(&items, Padding::None).unwrap()
+    }
+
     #[test]
     #[ignore]
     fn regenerate_vectors() {
         let mut vectors: Vec<TestVector> = serde_json::from_str(TEST_VECTORS_JSON).unwrap();
         for v in vectors.iter_mut() {
-            let content_bytes = hex::decode(&v.content).unwrap();
-            let (_, content) = parse_content(&content_bytes).unwrap();
             let keys: Vec<secp256k1::PublicKey> = v
                 .keys
                 .iter()
@@ -1886,15 +1997,29 @@ mod encrypted_backup {
                 .map(|s| DerivationPath::from_str(s).unwrap())
                 .collect();
             let nonce: [u8; 12] = hex::decode(&v.nonce).unwrap().try_into().unwrap();
-            let encrypted = encrypt_chacha20_poly1305_v1_with_nonce(
-                derivation_paths,
-                content,
-                keys,
-                v.plaintext.as_bytes(),
-                nonce,
-                Padding::None,
-            )
-            .unwrap();
+            let (metas, plaintexts) = vector_items(v);
+            let payload = encode_payload(&metas, &plaintexts);
+
+            let encrypted = if v.valid {
+                encode_v1_backup(derivation_paths, keys, payload, nonce).unwrap()
+            } else {
+                // All-zero-nonce backup: encrypt with the sentinel nonce, then
+                // overwrite the serialized nonce field with zeros.
+                let mut enc =
+                    encode_v1_backup(derivation_paths, keys, payload, SENTINEL_NONCE).unwrap();
+                let pos = enc
+                    .windows(12)
+                    .position(|w| w == SENTINEL_NONCE)
+                    .expect("sentinel nonce present");
+                for b in &mut enc[pos..pos + 12] {
+                    *b = 0;
+                }
+                assert!(
+                    matches!(decode_v1(&enc), Err(Error::ZeroedNonce)),
+                    "zeroed-nonce backup must be rejected"
+                );
+                enc
+            };
             v.expected = hex::encode(&encrypted);
             #[cfg(feature = "base64")]
             {
@@ -1914,12 +2039,6 @@ mod encrypted_backup {
         for v in vectors {
             let description = &v.description;
 
-            // Parse content metadata from hex
-            let content_bytes = hex::decode(&v.content).expect(description);
-            let (_, content) = parse_content(&content_bytes)
-                .ok()
-                .unwrap_or_else(|| panic!("Failed to parse content for: {description}"));
-
             let keys: Vec<secp256k1::PublicKey> = v
                 .keys
                 .iter()
@@ -1932,23 +2051,33 @@ mod encrypted_backup {
                 .map(|s| DerivationPath::from_str(s).expect(description))
                 .collect();
 
-            let plaintext = v.plaintext;
-
             let nonce_bytes = hex::decode(&v.nonce).expect(description);
             let nonce: [u8; 12] = nonce_bytes.try_into().expect("nonce must be 12 bytes");
 
             let expected_bytes = hex::decode(&v.expected).expect(description);
 
-            // Test encryption
-            let encrypted = encrypt_chacha20_poly1305_v1_with_nonce(
-                derivation_paths.clone(),
-                content.clone(),
-                keys.clone(),
-                plaintext.as_bytes(),
-                nonce,
-                Padding::None,
-            )
-            .expect(description);
+            let (metas, plaintexts) = vector_items(&v);
+            let expected_items: Vec<(Content, Vec<u8>)> = metas
+                .iter()
+                .zip(plaintexts.iter())
+                .map(|(m, p)| (parse_content(m).expect(description).1, p.clone()))
+                .collect();
+
+            // Invalid vectors (all-zero nonce) MUST be rejected at parse time,
+            // before any decryption is attempted.
+            if !v.valid {
+                assert!(
+                    matches!(decode_v1(&expected_bytes), Err(Error::ZeroedNonce)),
+                    "all-zero nonce must be rejected: {description}"
+                );
+                continue;
+            }
+
+            // Test encryption: re-encode through the multi-content payload path.
+            let payload = encode_payload(&metas, &plaintexts);
+            let encrypted =
+                encode_v1_backup(derivation_paths.clone(), keys.clone(), payload, nonce)
+                    .expect(description);
 
             assert_eq!(
                 encrypted, expected_bytes,
@@ -1999,23 +2128,16 @@ mod encrypted_backup {
 
             // Test decryption with each key
             for key in &keys {
-                let (decrypted_content, decrypted_plaintext) = decrypt_chacha20_poly1305_v1(
+                let decrypted = decrypt_chacha20_poly1305_v1(
                     *key,
                     &individual_secrets,
                     cyphertext.clone(),
                     parsed_nonce,
                 )
                 .expect(description);
-
-                let decrypted_plaintext = String::from_utf8(decrypted_plaintext).unwrap();
-
                 assert_eq!(
-                    decrypted_content, content,
-                    "Content metadata mismatch: {description}"
-                );
-                assert_eq!(
-                    decrypted_plaintext, plaintext,
-                    "Decrypted plaintext mismatch: {description}"
+                    decrypted, expected_items,
+                    "Decrypted items mismatch: {description}"
                 );
             }
 
@@ -2060,17 +2182,12 @@ mod encrypted_backup {
             );
 
             for key in &keys {
-                let (decrypted_content, decrypted_plaintext) =
+                let decrypted =
                     decrypt_chacha20_poly1305_v1(*key, &is_t, cyphertext_t.clone(), nonce_t)
                         .expect(description);
-                let decrypted_plaintext = String::from_utf8(decrypted_plaintext).unwrap();
                 assert_eq!(
-                    decrypted_content, content,
-                    "Content metadata mismatch with trailing bytes: {description}"
-                );
-                assert_eq!(
-                    decrypted_plaintext, plaintext,
-                    "Decrypted plaintext mismatch with trailing bytes: {description}"
+                    decrypted, expected_items,
+                    "Decrypted items mismatch with trailing bytes: {description}"
                 );
             }
         }
