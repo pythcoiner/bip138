@@ -3,9 +3,9 @@ extern crate alloc;
 use alloc::{collections::BTreeSet, str::FromStr, vec, vec::Vec};
 
 use crate::miniscript::{
+    Descriptor, DescriptorPublicKey, ForEachKey,
     bitcoin::{self, bip32::DerivationPath, secp256k1},
     descriptor::{DerivPaths, SinglePubKey, Wildcard},
-    Descriptor, DescriptorPublicKey, ForEachKey,
 };
 
 /// Internal-only x-only normalization used by NUMS detection. Bypasses the
@@ -141,12 +141,12 @@ pub mod tests {
     use alloc::{str::FromStr, vec};
 
     use crate::miniscript::{
+        Descriptor, DescriptorPublicKey, ToPublicKey,
         bitcoin::bip32::{self, ChainCode, ChildNumber, Fingerprint},
         descriptor::{
             self, DerivPaths, DescriptorMultiXKey, DescriptorXKey, SinglePub, SinglePubKey,
             Wildcard,
         },
-        Descriptor, DescriptorPublicKey, ToPublicKey,
     };
 
     pub fn descr_1() -> Descriptor<DescriptorPublicKey> {

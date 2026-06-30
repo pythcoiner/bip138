@@ -3,7 +3,7 @@ use bip138::miniscript;
 use clap::{Parser, Subcommand};
 
 use bip138::{Decrypted, EncryptedBackup, ToPayload};
-use miniscript::{descriptor::DescriptorKeyParseError, Descriptor, DescriptorPublicKey};
+use miniscript::{Descriptor, DescriptorPublicKey, descriptor::DescriptorKeyParseError};
 
 use std::{
     env,

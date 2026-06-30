@@ -2,20 +2,19 @@ extern crate alloc;
 use alloc::{collections::BTreeSet, vec, vec::Vec};
 
 use crate::miniscript::bitcoin::{
-    self,
+    self, VarInt,
     bip32::{ChildNumber, DerivationPath},
-    hashes::{sha256, Hash, HashEngine},
+    hashes::{Hash, HashEngine, sha256},
     secp256k1::{self, constants::SCHNORR_PUBLIC_KEY_SIZE},
-    VarInt,
 };
 use chacha20poly1305::{
-    aead::{Aead, KeyInit},
     ChaCha20Poly1305, Key, Nonce,
+    aead::{Aead, KeyInit},
 };
 #[cfg(feature = "rand")]
-use rand::{rngs::OsRng, TryRngCore};
+use rand::{TryRngCore, rngs::OsRng};
 
-use crate::{descriptor::bip341_nums, Encryption, Version};
+use crate::{Encryption, Version, descriptor::bip341_nums};
 
 const DECRYPTION_SECRET: &str = "BIP138_DECRYPTION_SECRET";
 const INDIVIDUAL_SECRET: &str = "BIP138_INDIVIDUAL_SECRET";

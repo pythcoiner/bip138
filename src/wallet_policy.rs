@@ -22,16 +22,17 @@ use core::{
 };
 
 use crate::{
+    Error,
     miniscript::{
+        Descriptor, DescriptorPublicKey, ForEachKey, MiniscriptKey, TranslateErr, TranslatePk,
+        Translator,
         bitcoin::{
             bip32::DerivationPath,
             hashes::{hash160, ripemd160, sha256},
         },
         descriptor::{DerivPaths, DescriptorMultiXKey, DescriptorXKey, Wildcard},
-        hash256, Descriptor, DescriptorPublicKey, ForEachKey, MiniscriptKey, TranslateErr,
-        TranslatePk, Translator,
+        hash256,
     },
-    Error,
 };
 
 /// A throwaway xpub used only to reuse miniscript's own suffix parser: the

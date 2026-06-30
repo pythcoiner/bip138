@@ -17,7 +17,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@master
         with:
-          toolchain: 1.85.0
+          toolchain: 1.88
           components: rustfmt, clippy
       - name: lint
         run: ./contrib/lint.sh
@@ -27,7 +27,7 @@ jobs:
     strategy:
       matrix:
         toolchain:
-          - 1.82
+          - 1.88
           - nightly
         os:
           - ubuntu-latest
@@ -44,7 +44,7 @@ jobs:
     strategy:
       matrix:
         toolchain:
-          - 1.82
+          - 1.88
         os:
           - ubuntu-latest
     runs-on: ${{ matrix.os }}
@@ -60,7 +60,7 @@ jobs:
     strategy:
       matrix:
         toolchain:
-          - 1.82
+          - 1.88
         os:
           - ubuntu-latest
     runs-on: ${{ matrix.os }}

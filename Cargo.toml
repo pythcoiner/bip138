@@ -1,7 +1,8 @@
 [package]
 name = "bip138"
 version = "0.0.0"
-edition = "2021"
+edition = "2024"
+rust-version = "1.88"
 readme = "README.md"
 description = "BIP138 Compact encryption scheme for Non-seed wallet data"
 license = "MIT"

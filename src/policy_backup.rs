@@ -13,13 +13,13 @@ use core::str::FromStr;
 use serde::{Deserialize, Serialize};
 
 use crate::{
+    Content, Decrypted, Error, ToPayload, Warning,
     descriptor::{bip341_nums, dpk_to_deriv_path},
     miniscript::{
-        bitcoin::{bip32::DerivationPath, secp256k1},
         Descriptor, DescriptorPublicKey,
+        bitcoin::{bip32::DerivationPath, secp256k1},
     },
     wallet_policy::WalletPolicy,
-    Content, Decrypted, Error, ToPayload, Warning,
 };
 
 /// Document version defined by this specification.
@@ -320,8 +320,7 @@ mod tests {
 
     #[test]
     fn single_literal_key_errors() {
-        let doc =
-            "{\"keys\":[\"0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798\"],\"policy\":\"pkh(@0/**)\"}";
+        let doc = "{\"keys\":[\"0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798\"],\"policy\":\"pkh(@0/**)\"}";
         let err = parse_policy_backup(doc.as_bytes()).unwrap_err();
         assert_eq!(err, Error::DescriptorBackup);
     }

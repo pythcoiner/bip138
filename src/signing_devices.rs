@@ -1,15 +1,15 @@
 use crate::miniscript::{
-    bitcoin::{bip32::DerivationPath, Network},
-    descriptor::{DescriptorXKey, Wildcard},
     DescriptorPublicKey,
+    bitcoin::{Network, bip32::DerivationPath},
+    descriptor::{DescriptorXKey, Wildcard},
 };
 use async_hwi::{
-    bitbox::{api::runtime, BitBox02, PairingBitbox02WithLocalCache},
+    HWI,
+    bitbox::{BitBox02, PairingBitbox02WithLocalCache, api::runtime},
     coldcard,
     jade::{self, Jade},
     ledger::{HidApi, Ledger, LedgerSimulator, TransportHID},
     specter::{Specter, SpecterSimulator},
-    HWI,
 };
 use std::{collections::BTreeSet, error::Error};
 

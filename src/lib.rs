@@ -10,14 +10,14 @@ use core::str::FromStr;
 use descriptor::descr_to_dpks;
 
 use crate::miniscript::{
-    bitcoin::{bip32::DerivationPath, secp256k1},
     Descriptor, DescriptorPublicKey,
+    bitcoin::{bip32::DerivationPath, secp256k1},
 };
 #[cfg(feature = "descriptor_backup")]
-pub use descriptor_backup::{parse_descriptor_backup, DescriptorBackup, DescriptorSet};
+pub use descriptor_backup::{DescriptorBackup, DescriptorSet, parse_descriptor_backup};
 pub use ll::{Content, Padding};
 #[cfg(feature = "descriptor_backup")]
-pub use policy_backup::{parse_policy_backup, PolicyBackup, PolicySet};
+pub use policy_backup::{PolicyBackup, PolicySet, parse_policy_backup};
 
 #[cfg(feature = "tokio")]
 pub use tokio;

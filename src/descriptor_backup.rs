@@ -10,12 +10,12 @@ use alloc::{boxed::Box, collections::BTreeSet, vec::Vec};
 use serde::{Deserialize, Serialize};
 
 use crate::{
+    Content, Decrypted, Error, ToPayload, Warning,
     descriptor::{descr_to_dpks, descr_warnings, dpks_to_derivation_keys_paths},
     miniscript::{
-        bitcoin::{bip32::DerivationPath, secp256k1},
         Descriptor, DescriptorPublicKey,
+        bitcoin::{bip32::DerivationPath, secp256k1},
     },
-    Content, Decrypted, Error, ToPayload, Warning,
 };
 
 /// Document version defined by this specification.
