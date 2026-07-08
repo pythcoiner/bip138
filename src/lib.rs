@@ -248,6 +248,7 @@ impl EncryptedBackup {
     pub fn encrypt(
         self,
         #[cfg(not(feature = "rand"))] nonce: [u8; 12],
+        #[cfg(not(feature = "rand"))] decoy_individual_secrets: &[[u8; 32]],
     ) -> Result<Encrypted, Error> {
         if self.content == Content::Unknown {
             return Err(Error::UnknownContent);
@@ -275,6 +276,8 @@ impl EncryptedBackup {
                     self.padding,
                     #[cfg(not(feature = "rand"))]
                     nonce,
+                    #[cfg(not(feature = "rand"))]
+                    decoy_individual_secrets,
                 )?;
                 Ok(Encrypted { bytes, warnings })
             }
@@ -1020,11 +1023,14 @@ mod tests {
             .bytes;
 
         let (_paths, secrets, _enc, _nonce, _ct) = ll::decode_v1(&bytes).unwrap();
-        assert_eq!(secrets.len(), 1);
-        assert_ne!(
-            secrets[0], [0u8; 32],
-            "single-sig blob must not store a zeroed individual secret"
-        );
+        // the real secret plus random decoys up to the smallest bucket
+        assert_eq!(secrets.len(), 5);
+        for secret in secrets {
+            assert_ne!(
+                secret, [0u8; 32],
+                "single-sig blob must not store a zeroed individual secret"
+            );
+        }
     }
 
     // The next group of tests pins down the "Descriptor key requirements" rule

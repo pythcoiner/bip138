@@ -296,6 +296,19 @@ pub enum Padding {
     Geometric,
 }
 
+fn doubling_bucket(len: usize) -> Result<usize, Error> {
+    let mut bucket = 5usize;
+    while bucket < len {
+        bucket = bucket
+            .checked_mul(2)
+            .ok_or(Error::IndividualSecretsLength)?;
+    }
+    if bucket > u8::MAX as usize {
+        return Err(Error::IndividualSecretsLength);
+    }
+    Ok(bucket)
+}
+
 impl Padding {
     pub fn padded_size(&self, len: usize) -> Result<usize, Error> {
         match self {
@@ -399,7 +412,9 @@ pub fn encode_derivation_paths(derivation_paths: Vec<DerivationPath>) -> Result<
 /// Encode following this format:
 /// <LENGTH><INDIVIDUAL_SECRET_1><INDIVIDUAL_SECRET_2><..><INDIVIDUAL_SECRET_N>
 pub fn encode_individual_secrets(individual_secrets: &[[u8; 32]]) -> Result<Vec<u8>, Error> {
-    let individual_secrets: BTreeSet<_> = individual_secrets.iter().collect();
+    let mut individual_secrets = individual_secrets.to_vec();
+    individual_secrets.sort();
+    individual_secrets.dedup();
     if individual_secrets.len() > u8::MAX as usize {
         return Err(Error::IndividualSecretsLength);
     } else if individual_secrets.is_empty() {
@@ -409,7 +424,7 @@ pub fn encode_individual_secrets(individual_secrets: &[[u8; 32]]) -> Result<Vec<
     let mut out = Vec::with_capacity(1 + (individual_secrets.len() * 32));
     out.push(len);
     for is in individual_secrets {
-        out.append(&mut is.to_vec());
+        out.extend_from_slice(&is);
     }
     Ok(out)
 }
@@ -557,6 +572,7 @@ fn encrypt_chacha20_poly1305_v1_with_nonce(
     data: &[u8],
     nonce: [u8; 12],
     padding: Padding,
+    #[cfg(not(feature = "rand"))] decoy_individual_secrets: &[[u8; 32]],
 ) -> Result<Vec<u8>, Error> {
     // NOTE: RFC 8439 caps ChaCha20-Poly1305 plaintext at 2^38 - 64 bytes, but we
     // limit it to u32::MAX so the length never exceeds usize::MAX on 32-bit
@@ -578,7 +594,14 @@ fn encrypt_chacha20_poly1305_v1_with_nonce(
 
     // <PAYLOAD> = (<CONTENT_METADATA><LENGTH><PLAINTEXT>)+ (<PADDING>)
     let payload = encode_plaintext(&[(&content_metadata, data)], padding)?;
-    encode_v1_backup(derivation_paths, keys, payload, nonce)
+    encode_v1_backup(
+        derivation_paths,
+        keys,
+        payload,
+        nonce,
+        #[cfg(not(feature = "rand"))]
+        decoy_individual_secrets,
+    )
 }
 
 /// Assemble a V1 backup from an already-encoded `payload` (see `encode_plaintext`),
@@ -589,7 +612,30 @@ fn encode_v1_backup(
     keys: Vec<secp256k1::PublicKey>,
     payload: Vec<u8>,
     nonce: [u8; 12],
+    #[cfg(not(feature = "rand"))] decoy_individual_secrets: &[[u8; 32]],
 ) -> Result<Vec<u8>, Error> {
+    encode_v1_backup_with_padding(
+        derivation_paths,
+        keys,
+        payload,
+        nonce,
+        #[cfg(feature = "rand")]
+        pad_individual_secrets,
+        #[cfg(not(feature = "rand"))]
+        |secrets| pad_individual_secrets_with_decoys(secrets, decoy_individual_secrets),
+    )
+}
+
+fn encode_v1_backup_with_padding<F>(
+    derivation_paths: Vec<DerivationPath>,
+    keys: Vec<secp256k1::PublicKey>,
+    payload: Vec<u8>,
+    nonce: [u8; 12],
+    pad_individual_secrets: F,
+) -> Result<Vec<u8>, Error>
+where
+    F: FnOnce(Vec<[u8; 32]>) -> Result<Vec<[u8; 32]>, Error>,
+{
     // drop duplicates keys and sort out bip341 nums
     let nums_xonly = bip341_nums().x_only_public_key().0;
     let keys = keys
@@ -617,8 +663,9 @@ fn encode_v1_backup(
         .collect::<Vec<[u8; XONLY_KEY_SIZE]>>();
 
     let secret = decryption_secret(&raw_keys);
-    let individual_secrets =
-        encode_individual_secrets(&individual_secrets(&secret, raw_keys.as_slice()))?;
+    let individual_secrets = individual_secrets(&secret, raw_keys.as_slice());
+    let individual_secrets = pad_individual_secrets(individual_secrets)?;
+    let individual_secrets = encode_individual_secrets(&individual_secrets)?;
     let derivation_paths = encode_derivation_paths(derivation_paths)?;
 
     let (nonce, cyphertext) = encrypt_with_nonce(secret, payload, nonce)?;
@@ -633,6 +680,52 @@ fn encode_v1_backup(
     ))
 }
 
+#[cfg(all(test, feature = "rand"))]
+fn encode_v1_backup_for_test_vectors(
+    derivation_paths: Vec<DerivationPath>,
+    keys: Vec<secp256k1::PublicKey>,
+    payload: Vec<u8>,
+    nonce: [u8; 12],
+    decoy_individual_secrets: &[[u8; 32]],
+) -> Result<Vec<u8>, Error> {
+    encode_v1_backup_with_padding(derivation_paths, keys, payload, nonce, |secrets| {
+        pad_individual_secrets_with_decoys(secrets, decoy_individual_secrets)
+    })
+}
+
+#[cfg(feature = "rand")]
+fn pad_individual_secrets(mut secrets: Vec<[u8; 32]>) -> Result<Vec<[u8; 32]>, Error> {
+    let target = doubling_bucket(secrets.len())?;
+    let mut rng = OsRng;
+    while secrets.len() < target {
+        let mut decoy = [0u8; 32];
+        rng.try_fill_bytes(&mut decoy)
+            .map_err(|_| Error::IndividualSecretsLength)?;
+        if decoy != [0u8; 32] && !secrets.contains(&decoy) {
+            secrets.push(decoy);
+        }
+    }
+    Ok(secrets)
+}
+
+#[cfg(any(not(feature = "rand"), all(test, feature = "rand")))]
+fn pad_individual_secrets_with_decoys(
+    mut secrets: Vec<[u8; 32]>,
+    decoys: &[[u8; 32]],
+) -> Result<Vec<[u8; 32]>, Error> {
+    let target = doubling_bucket(secrets.len())?;
+    if decoys.len() != target - secrets.len() {
+        return Err(Error::IndividualSecretsLength);
+    }
+    for decoy in decoys {
+        if *decoy == [0u8; 32] || secrets.contains(decoy) {
+            return Err(Error::IndividualSecretsLength);
+        }
+        secrets.push(*decoy);
+    }
+    Ok(secrets)
+}
+
 pub fn encrypt_chacha20_poly1305_v1(
     derivation_paths: Vec<DerivationPath>,
     content_metadata: Content,
@@ -640,6 +733,7 @@ pub fn encrypt_chacha20_poly1305_v1(
     data: &[u8],
     padding: Padding,
     #[cfg(not(feature = "rand"))] nonce: [u8; 12],
+    #[cfg(not(feature = "rand"))] decoy_individual_secrets: &[[u8; 32]],
 ) -> Result<Vec<u8>, Error> {
     #[cfg(feature = "rand")]
     let nonce = nonce();
@@ -650,6 +744,8 @@ pub fn encrypt_chacha20_poly1305_v1(
         data,
         nonce,
         padding,
+        #[cfg(not(feature = "rand"))]
+        decoy_individual_secrets,
     )
 }
 
@@ -1133,6 +1229,15 @@ mod tests {
     }
 
     #[test]
+    fn test_individual_secrets_are_padded_to_bucket() {
+        assert_eq!(doubling_bucket(1).unwrap(), 5);
+        assert_eq!(doubling_bucket(5).unwrap(), 5);
+        assert_eq!(doubling_bucket(6).unwrap(), 10);
+        assert_eq!(doubling_bucket(11).unwrap(), 20);
+        assert_eq!(doubling_bucket(21).unwrap(), 40);
+    }
+
+    #[test]
     fn test_encode_decode_plaintext_ignores_padding() {
         let content_metadata: Vec<u8> = Content::Bip380.try_into().unwrap();
 
@@ -1496,6 +1601,21 @@ mod tests {
     }
 
     #[test]
+    fn test_secret_padded_encrypt_decrypt() {
+        let keys = vec![pk1()];
+        let data = "test".as_bytes().to_vec();
+        let bytes =
+            encrypt_chacha20_poly1305_v1(vec![], Content::Bip380, keys, &data, Padding::None)
+                .unwrap();
+
+        let (_, individual_secrets, _, nonce, cyphertext) = decode_v1(&bytes).unwrap();
+        assert_eq!(individual_secrets.len(), 5);
+        let decrypted =
+            decrypt_chacha20_poly1305_v1(pk1(), &individual_secrets, cyphertext, nonce).unwrap();
+        assert_eq!(decrypted, vec![(Content::Bip380, b"test".to_vec())]);
+    }
+
+    #[test]
     fn test_decrypt_wrong_secret() {
         let mut engine = sha256::HashEngine::default();
         engine.input("secret".as_bytes());
@@ -1550,6 +1670,60 @@ mod tests {
         // decryption must then fails
         let fails = try_decrypt_chacha20_poly1305(&ciphertext, secret.as_byte_array(), nonce);
         assert!(fails.is_none());
+    }
+}
+
+#[cfg(all(test, not(feature = "rand")))]
+mod no_rand_tests {
+    use super::*;
+    use alloc::vec;
+
+    fn pk() -> secp256k1::PublicKey {
+        let secp = secp256k1::Secp256k1::new();
+        let sk = secp256k1::SecretKey::from_slice(&[1u8; 32]).unwrap();
+        secp256k1::PublicKey::from_secret_key(&secp, &sk)
+    }
+
+    #[test]
+    fn test_no_rand_requires_caller_decoys() {
+        let keys = vec![pk()];
+        let data = "test".as_bytes().to_vec();
+        let nonce = [1u8; 12];
+
+        let missing = encrypt_chacha20_poly1305_v1(
+            vec![],
+            Content::Bip380,
+            keys.clone(),
+            &data,
+            Padding::None,
+            nonce,
+            &[],
+        );
+        assert_eq!(missing, Err(Error::IndividualSecretsLength));
+
+        let zero_decoy = encrypt_chacha20_poly1305_v1(
+            vec![],
+            Content::Bip380,
+            keys.clone(),
+            &data,
+            Padding::None,
+            nonce,
+            &[[0u8; 32]; 4],
+        );
+        assert_eq!(zero_decoy, Err(Error::IndividualSecretsLength));
+
+        let bytes = encrypt_chacha20_poly1305_v1(
+            vec![],
+            Content::Bip380,
+            keys,
+            &data,
+            Padding::None,
+            nonce,
+            &[[1u8; 32], [2u8; 32], [3u8; 32], [4u8; 32]],
+        )
+        .unwrap();
+        let (_, individual_secrets, _, _, _) = decode_v1(&bytes).unwrap();
+        assert_eq!(individual_secrets.len(), 5);
     }
 }
 
@@ -1933,6 +2107,7 @@ mod encrypted_backup {
         encryption: u8,
         content: String,
         keys: Vec<String>,
+        decoy_individual_secrets: Vec<String>,
         derivation_paths: Vec<String>,
         plaintext: String,
         nonce: String,
@@ -1980,6 +2155,16 @@ mod encrypted_backup {
         encode_plaintext(&items, Padding::None).unwrap()
     }
 
+    fn decoy_individual_secrets(v: &TestVector) -> Vec<[u8; 32]> {
+        v.decoy_individual_secrets
+            .iter()
+            .map(|hex_str| {
+                let bytes = hex::decode(hex_str).expect(&v.description);
+                bytes.try_into().expect("decoy secret must be 32 bytes")
+            })
+            .collect()
+    }
+
     #[test]
     #[ignore]
     fn regenerate_vectors() {
@@ -1996,16 +2181,24 @@ mod encrypted_backup {
                 .map(|s| DerivationPath::from_str(s).unwrap())
                 .collect();
             let nonce: [u8; 12] = hex::decode(&v.nonce).unwrap().try_into().unwrap();
+            let decoys = decoy_individual_secrets(v);
             let (metas, plaintexts) = vector_items(v);
             let payload = encode_payload(&metas, &plaintexts);
 
             let encrypted = if v.valid {
-                encode_v1_backup(derivation_paths, keys, payload, nonce).unwrap()
+                encode_v1_backup_for_test_vectors(derivation_paths, keys, payload, nonce, &decoys)
+                    .unwrap()
             } else {
                 // All-zero-nonce backup: encrypt with the sentinel nonce, then
                 // overwrite the serialized nonce field with zeros.
-                let mut enc =
-                    encode_v1_backup(derivation_paths, keys, payload, SENTINEL_NONCE).unwrap();
+                let mut enc = encode_v1_backup_for_test_vectors(
+                    derivation_paths,
+                    keys,
+                    payload,
+                    SENTINEL_NONCE,
+                    &decoys,
+                )
+                .unwrap();
                 let pos = enc
                     .windows(12)
                     .position(|w| w == SENTINEL_NONCE)
@@ -2052,6 +2245,7 @@ mod encrypted_backup {
 
             let nonce_bytes = hex::decode(&v.nonce).expect(description);
             let nonce: [u8; 12] = nonce_bytes.try_into().expect("nonce must be 12 bytes");
+            let decoys = decoy_individual_secrets(&v);
 
             let expected_bytes = hex::decode(&v.expected).expect(description);
 
@@ -2074,9 +2268,14 @@ mod encrypted_backup {
 
             // Test encryption: re-encode through the multi-content payload path.
             let payload = encode_payload(&metas, &plaintexts);
-            let encrypted =
-                encode_v1_backup(derivation_paths.clone(), keys.clone(), payload, nonce)
-                    .expect(description);
+            let encrypted = encode_v1_backup_for_test_vectors(
+                derivation_paths.clone(),
+                keys.clone(),
+                payload,
+                nonce,
+                &decoys,
+            )
+            .expect(description);
 
             assert_eq!(
                 encrypted, expected_bytes,
