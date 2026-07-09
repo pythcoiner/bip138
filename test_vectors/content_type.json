@@ -35,6 +35,11 @@
     "content": "020400010203"
   },
   {
+    "description": "String",
+    "valid": true,
+    "content": "0300"
+  },
+  {
     "description": "TYPE 0x00 is reserved",
     "valid": false,
     "content": "00"
@@ -53,6 +58,11 @@
     "description": "Invalid proprietary (LENGTH exceeds payload)",
     "valid": false,
     "content": "020500"
+  },
+  {
+    "description": "Invalid string (metadata must be empty)",
+    "valid": false,
+    "content": "030161"
   },
   {
     "description": "TYPE >= 0x80 stops parsing",

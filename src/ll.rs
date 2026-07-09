@@ -71,6 +71,7 @@ pub enum Content {
     Bip329,
     BIP(u16),
     Proprietary(Vec<u8>),
+    String,
     Unknown,
 }
 
@@ -91,6 +92,7 @@ pub enum Content {
 // | 0x00   | Reserved                               |
 // | 0x01   | BIP Number (big-endian uint16)         |
 // | 0x02   | Vendor-Specific Opaque Tag             |
+// | 0x03   | String                                 |
 //
 // `LENGTH`: variable-length integer representing the length of `DATA` in bytes.
 //
@@ -102,6 +104,7 @@ pub enum Content {
 // - 0x00: parsers MUST reject the payload.
 // - 0x01: `LENGTH` MUST be omitted and `DATA` is a 2-byte big-endian unsigned integer representing the BIP number that defines it.
 // - 0x02: `DATA` MUST be `LENGTH` bytes of opaque, vendor-specific data.
+// - 0x03: `DATA` MUST be empty, and the following `PLAINTEXT` is the string itself, which MUST be UTF-8.
 //
 // For all `TYPE` values except `0x01`, parsers MUST reject `CONTENT` if `LENGTH` exceeds the remaining payload bytes.
 //
@@ -111,6 +114,7 @@ pub enum Content {
 const CONTENT_RESERVED: u8 = 0x00;
 const CONTENT_BIP: u8 = 0x01;
 const CONTENT_PROPRIETARY: u8 = 0x02;
+const CONTENT_STRING: u8 = 0x03;
 const CONTENT_UPGRADE: u8 = 0x80;
 impl TryFrom<Content> for Vec<u8> {
     type Error = ();
@@ -125,11 +129,13 @@ impl TryFrom<Content> for Vec<u8> {
                 vec![CONTENT_BIP]
             }
             Content::Proprietary(_) => vec![CONTENT_PROPRIETARY],
+            Content::String => vec![CONTENT_STRING],
         };
         let mut len = match &value {
             Content::Proprietary(d) => {
                 bitcoin::consensus::serialize(&bitcoin::VarInt(d.len() as u64))
             }
+            Content::String => bitcoin::consensus::serialize(&bitcoin::VarInt(0)),
             _ => vec![],
         };
         out.append(&mut len);
@@ -141,6 +147,7 @@ impl TryFrom<Content> for Vec<u8> {
             Content::Bip329 => 329u16.to_be_bytes().to_vec(),
             Content::BIP(bip) => bip.to_be_bytes().to_vec(),
             Content::Proprietary(d) => d,
+            Content::String => vec![],
         };
         out.append(&mut data);
         Ok(out)
@@ -174,12 +181,17 @@ pub fn parse_content(bytes: &[u8]) -> Result<(usize, Content), Error> {
             if len < end {
                 return Err(Error::ContentMetadata);
             }
-            if t == CONTENT_PROPRIETARY {
-                let data = bytes[offset + 1..end].to_vec();
-                Ok((end, Content::Proprietary(data)))
-            } else {
+            let data = bytes[offset + 1..end].to_vec();
+            match t {
+                CONTENT_PROPRIETARY => Ok((end, Content::Proprietary(data))),
+                CONTENT_STRING => {
+                    if !data.is_empty() {
+                        return Err(Error::ContentMetadata);
+                    }
+                    Ok((end, Content::String))
+                }
                 // Parsers MUST skip unknown `TYPE` values less than `0x80`, by consuming `LENGTH` bytes of `DATA`.
-                Ok((end, Content::Unknown))
+                _ => Ok((end, Content::Unknown)),
             }
         }
         _ => {
@@ -197,7 +209,8 @@ impl Content {
             | Content::Bip380
             | Content::Bip388
             | Content::Bip329
-            | Content::BIP(_) => true,
+            | Content::BIP(_)
+            | Content::String => true,
         }
     }
 }
@@ -1245,6 +1258,8 @@ mod tests {
         // Proprietary: TYPE=0x02, LENGTH=3, data=00 00 00
         let (_, c) = parse_content(&[2, 3, 0, 0, 0]).unwrap();
         assert_eq!(c, Content::Proprietary(vec![0, 0, 0]));
+        let (_, c) = parse_content(&[3, 0]).unwrap();
+        assert_eq!(c, Content::String);
     }
 
     #[test]
@@ -1297,6 +1312,9 @@ mod tests {
         let mut c = Content::Proprietary(vec![0, 0, 0]);
         let mut serialized: Vec<u8> = c.try_into().unwrap();
         assert_eq!(serialized, vec![0x02, 0x03, 0, 0, 0]);
+        c = Content::String;
+        serialized = c.try_into().unwrap();
+        assert_eq!(serialized, vec![0x03, 0x00]);
         // BIP 380: TYPE=0x01, 2-byte BE BIP number (no LENGTH)
         c = Content::Bip380;
         serialized = c.try_into().unwrap();
@@ -1335,6 +1353,8 @@ mod tests {
         assert!(!c.is_known());
         c = Content::Proprietary(vec![0, 0, 0]);
         assert!(!c.is_known());
+        c = Content::String;
+        assert!(c.is_known());
         c = Content::Bip380;
         assert!(c.is_known());
         c = Content::Bip388;
@@ -2666,6 +2686,7 @@ mod content_vectors {
                 Content::Proprietary(vec![0x00, 0x01, 0x02, 0x03]),
                 "Propietary 00010203".to_string(),
             ),
+            (Content::String, "String".to_string()),
         ];
 
         assert_eq!(parsed, expected);

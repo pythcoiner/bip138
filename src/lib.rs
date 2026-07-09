@@ -91,6 +91,21 @@ impl ToPayload for Vec<u8> {
     }
 }
 
+impl ToPayload for String {
+    fn to_payload(&self) -> Result<Vec<u8>, Error> {
+        Ok(self.as_bytes().to_vec())
+    }
+    fn content_type(&self) -> Content {
+        Content::String
+    }
+    fn derivation_paths(&self) -> Result<Vec<DerivationPath>, Error> {
+        Ok(vec![])
+    }
+    fn keys(&self) -> Result<Vec<secp256k1::PublicKey>, Error> {
+        Ok(vec![])
+    }
+}
+
 impl ToPayload for Descriptor<DescriptorPublicKey> {
     fn to_payload(&self) -> Result<Vec<u8>, Error> {
         Ok(self.to_string().as_bytes().to_vec())
@@ -213,6 +228,7 @@ pub enum Decrypted {
     Policy,
     Labels,
     WalletBackup(Vec<u8>),
+    String(String),
     Raw(Vec<u8>),
 }
 
@@ -430,6 +446,10 @@ impl EncryptedBackup {
     pub fn extract(content: Content, bytes: Vec<u8>) -> Result<Decrypted, Error> {
         match content {
             Content::None | Content::Unknown => Ok(Decrypted::Raw(bytes)),
+            Content::String => {
+                let string = String::from_utf8(bytes).map_err(|_| Error::Utf8)?;
+                Ok(Decrypted::String(string))
+            }
             Content::Bip380 => {
                 // Try a bare descriptor first; fall back to a JSON descriptor
                 // backup document if it is not a descriptor.
@@ -528,6 +548,42 @@ impl EncryptedBackup {
             v0::Decrypted::WalletBackup(b) => Decrypted::WalletBackup(b),
             v0::Decrypted::Raw(b) => Decrypted::Raw(b),
         })
+    }
+}
+
+#[cfg(all(test, feature = "rand"))]
+mod string_tests {
+    use super::*;
+
+    #[test]
+    fn string_roundtrip() {
+        let payload = String::from("backup note");
+        let bytes = EncryptedBackup::new()
+            .set_payload(&payload)
+            .unwrap()
+            .set_keys(vec![test_key(1)])
+            .encrypt()
+            .unwrap()
+            .bytes;
+
+        let restored = EncryptedBackup::new()
+            .set_encrypted_payload(&bytes)
+            .unwrap()
+            .set_keys(vec![test_key(1)])
+            .decrypt()
+            .unwrap();
+
+        assert_eq!(restored, vec![Decrypted::String(payload)]);
+    }
+
+    fn test_key(tag: u8) -> secp256k1::PublicKey {
+        let secp = secp256k1::Secp256k1::new();
+        let mut sk = [0u8; 32];
+        sk[31] = tag;
+        secp256k1::PublicKey::from_secret_key(
+            &secp,
+            &secp256k1::SecretKey::from_slice(&sk).unwrap(),
+        )
     }
 }
 
