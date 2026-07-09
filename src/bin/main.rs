@@ -2,12 +2,17 @@ use bip138::miniscript;
 
 use clap::{Parser, Subcommand};
 
-use bip138::{Decrypted, EncryptedBackup, EncryptedMetadata, ToPayload};
+use bip138::{Bip138, Decrypted, EncryptedBackup, EncryptedMetadata, ToPayload};
 #[cfg(feature = "devices")]
-use miniscript::bitcoin::{Network, bip32::DerivationPath, secp256k1::PublicKey};
+use miniscript::bitcoin::Network;
+use miniscript::bitcoin::bip32::DerivationPath;
+#[cfg(feature = "devices")]
+use miniscript::bitcoin::bip32::Fingerprint;
+use miniscript::bitcoin::secp256k1::PublicKey;
 use miniscript::{Descriptor, DescriptorPublicKey, descriptor::DescriptorKeyParseError};
 
 use std::{
+    collections::BTreeSet,
     env,
     fs::{self, File},
     io::Write,
@@ -39,6 +44,8 @@ pub enum CliError {
     FailedToDecrypt(bip138::Error),
     FailedToInspect(bip138::Error),
     JsonError(serde_json::Error),
+    WrapKeys,
+    DeviceWithKeys,
     #[cfg(feature = "devices")]
     FailedToFetchXpub(bip138::signing_devices::FetchFailed),
     #[cfg(feature = "devices")]
@@ -66,6 +73,8 @@ impl std::fmt::Display for CliError {
             CliError::FailedToDecrypt(err) => write!(f, "Cannot decrypt: {err:?}"),
             CliError::FailedToInspect(err) => write!(f, "Cannot inspect: {err:?}"),
             CliError::JsonError(err) => write!(f, "Cannot format JSON: {err:?}"),
+            CliError::WrapKeys => write!(f, "Invalid wrap keys file"),
+            CliError::DeviceWithKeys => write!(f, "Cannot use --device with --keys"),
             #[cfg(feature = "devices")]
             CliError::FailedToFetchXpub(err) => write!(f, "Cannot fetch xpub: {err}"),
             #[cfg(feature = "devices")]
@@ -93,6 +102,34 @@ enum Commands {
         /// Message to add before the descriptor payload
         #[arg(long)]
         msg: Option<String>,
+
+        /// File listing outer-to-inner wrapping key levels
+        ///
+        /// One level per line, outermost first: each level encrypts the one
+        /// below it, and the last line encrypts the descriptor itself.
+        ///
+        /// A line is one key, several keys separated by `|`, or a note and its
+        /// keys separated by `||`:
+        ///
+        ///     [48bfdc46/48h/1h/10h/2h]tpubDF6MC...
+        ///     [c658b283/48h/1h/10h/2h]tpubDFHe6... | [748f7513/48h/1h/10h/2h]tpubDEwiF...
+        ///     backup 2026 || [c658b283/48h/1h/10h/2h]tpubDFHe6...
+        ///
+        /// Each key must carry its origin, as `[fingerprint/derivation]xpub`,
+        /// and any one key of a level decrypts that level.
+        ///
+        /// A note is stored encrypted at its level and shows up when that level
+        /// is decrypted. Blank lines and lines starting with `#` are ignored.
+        /// Cannot be used with --device.
+        ///
+        /// Example:
+        ///
+        ///     # outer level, either signer can unwrap it
+        ///     backup 2026 || [c658b283/48h/1h/10h/2h]tpubDFHe6... | [748f7513/48h/1h/10h/2h]tpubDEwiF...
+        ///     # inner level, holds the descriptor
+        ///     [48bfdc46/48h/1h/10h/2h]tpubDF6MC...
+        #[arg(long, verbatim_doc_comment)]
+        keys: Option<String>,
 
         /// Add a signing-device key to the encryption key set
         #[cfg(feature = "devices")]
@@ -158,6 +195,7 @@ async fn main() -> Result<(), CliError> {
             file,
             output,
             msg,
+            keys,
             #[cfg(feature = "devices")]
             device,
         } => {
@@ -188,20 +226,40 @@ async fn main() -> Result<(), CliError> {
             };
 
             let data = fs::read_to_string(&input_path).map_err(CliError::ReadError)?;
+            let wrap_levels = match keys {
+                Some(path) => {
+                    parse_wrap_keys(&fs::read_to_string(path).map_err(CliError::ReadError)?)?
+                }
+                None => vec![],
+            };
 
             // The read descritor need to be readed with a trimmed white space
             let descriptor = Descriptor::<DescriptorPublicKey>::from_str(data.trim())
                 .map_err(CliError::CantConvertToDescriptor)?;
 
-            // encrypt the descriptor
-            let backup = match msg {
-                Some(msg) => {
-                    let payloads: [&dyn ToPayload; 2] = [msg, &descriptor];
-                    EncryptedBackup::new().set_payloads(&payloads)
+            if !wrap_levels.is_empty() {
+                #[cfg(feature = "devices")]
+                if device.is_some() {
+                    return Err(CliError::DeviceWithKeys);
                 }
-                None => EncryptedBackup::new().set_payload(&descriptor),
+
+                let Some((inner_level, outer_levels)) = wrap_levels.split_last() else {
+                    return Err(CliError::WrapKeys);
+                };
+                let mut encrypted =
+                    encrypt_descriptor_level(inner_level, msg.as_ref(), &descriptor)?;
+                for level in outer_levels.iter().rev() {
+                    encrypted = encrypt_wrap_level(level, encrypted.bytes)?;
+                }
+                let mut output = File::create(&output_path).map_err(CliError::CreateError)?;
+                output
+                    .write_all(&encrypted.bytes)
+                    .map_err(CliError::WriteError)?;
+                println!("descriptor written to {output_path:?}");
+                return Ok(());
             }
-            .map_err(CliError::FailedToEncrypt)?;
+
+            let backup = descriptor_backup(msg.as_ref(), &descriptor)?;
             #[cfg(feature = "devices")]
             let mut used_deriv_paths = backup.get_derivation_paths();
             #[cfg(not(feature = "devices"))]
@@ -232,8 +290,9 @@ async fn main() -> Result<(), CliError> {
             }
 
             let encrypted = backup.encrypt().map_err(CliError::FailedToEncrypt)?;
+            let warnings = encrypted.warnings.clone();
 
-            for w in &encrypted.warnings {
+            for w in &warnings {
                 match w {
                     bip138::Warning::DisallowedKeyExpression(k) => {
                         eprintln!(
@@ -500,8 +559,8 @@ async fn main() -> Result<(), CliError> {
             } else {
                 device_network(core::slice::from_ref(&path))
             };
-            let xpub = bip138::signing_devices::fetch_first_xpub_at_path(
-                path,
+            let fetched = bip138::signing_devices::fetch_first_origin_xpub_at_path(
+                path.clone(),
                 network,
                 fetch_log_to_stderr,
             )
@@ -509,8 +568,9 @@ async fn main() -> Result<(), CliError> {
             .map_err(CliError::FailedToFetchXpub)?
             .ok_or(CliError::NoKeys)?;
 
+            let xpub = origin_xpub(fetched.fingerprint, &path, &fetched.xpub);
             match file {
-                Some(path) => append_line(path, &xpub.to_string())?,
+                Some(path) => append_line(path, &xpub)?,
                 None => println!("{xpub}"),
             }
         }
@@ -534,6 +594,15 @@ fn append_line(path: &str, line: &str) -> Result<(), CliError> {
         .open(path)
         .map_err(CliError::OpenError)?;
     writeln!(file, "{line}").map_err(CliError::WriteError)
+}
+
+#[cfg(feature = "devices")]
+fn origin_xpub(
+    fingerprint: Fingerprint,
+    path: &DerivationPath,
+    xpub: &miniscript::bitcoin::bip32::Xpub,
+) -> String {
+    format!("[{fingerprint}/{path}]{xpub}")
 }
 
 #[cfg(feature = "devices")]
@@ -636,8 +705,159 @@ fn decrypted_to_bytes(decrypted: Decrypted) -> Result<Vec<u8>, CliError> {
         }
         Decrypted::PolicyBackup(backup) => backup.to_payload().map_err(CliError::FailedToDecrypt),
         Decrypted::String(msg) => Ok(msg.into_bytes()),
+        Decrypted::Bip138(bytes) => Ok(bytes),
         _ => Err(CliError::Content),
     }
+}
+
+fn descriptor_backup(
+    msg: Option<&String>,
+    descriptor: &Descriptor<DescriptorPublicKey>,
+) -> Result<EncryptedBackup, CliError> {
+    match msg {
+        Some(msg) => {
+            let payloads: [&dyn ToPayload; 2] = [msg, descriptor];
+            EncryptedBackup::new()
+                .set_payloads(&payloads)
+                .map_err(CliError::FailedToEncrypt)
+        }
+        None => EncryptedBackup::new()
+            .set_payload(descriptor)
+            .map_err(CliError::FailedToEncrypt),
+    }
+}
+
+#[derive(Debug)]
+struct WrapLevel {
+    msg: Option<String>,
+    keys: Vec<DescriptorPublicKey>,
+}
+
+fn parse_wrap_keys(data: &str) -> Result<Vec<WrapLevel>, CliError> {
+    let mut levels = vec![];
+    for line in data.lines() {
+        let line = line.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        let (msg, keys) = match line.split_once("||") {
+            Some((msg, keys)) => {
+                let msg = msg.trim();
+                let msg = (!msg.is_empty()).then(|| msg.to_string());
+                (msg, keys)
+            }
+            None => (None, line),
+        };
+        let keys = keys
+            .split('|')
+            .map(str::trim)
+            .filter(|key| !key.is_empty())
+            .map(|key| {
+                let key =
+                    DescriptorPublicKey::from_str(key).map_err(CliError::CantConvertToXpub)?;
+                key_has_origin(&key)
+                    .then_some(key)
+                    .ok_or(CliError::WrapKeys)
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        if keys.is_empty() {
+            return Err(CliError::WrapKeys);
+        }
+        levels.push(WrapLevel { msg, keys });
+    }
+    Ok(levels)
+}
+
+fn key_has_origin(key: &DescriptorPublicKey) -> bool {
+    match key {
+        DescriptorPublicKey::XPub(key) => key.origin.is_some(),
+        DescriptorPublicKey::MultiXPub(key) => key.origin.is_some(),
+        DescriptorPublicKey::Single(_) => false,
+    }
+}
+
+fn encrypt_descriptor_level(
+    level: &WrapLevel,
+    msg: Option<&String>,
+    descriptor: &Descriptor<DescriptorPublicKey>,
+) -> Result<bip138::Encrypted, CliError> {
+    let mut payloads: Vec<&dyn ToPayload> = vec![];
+    if let Some(msg) = &level.msg {
+        payloads.push(msg);
+    }
+    if let Some(msg) = msg {
+        payloads.push(msg);
+    }
+    payloads.push(descriptor);
+    encrypt_to_level_keys(level, &payloads)
+}
+
+fn encrypt_wrap_level(level: &WrapLevel, bytes: Vec<u8>) -> Result<bip138::Encrypted, CliError> {
+    let bip138 = Bip138(bytes);
+    let mut payloads: Vec<&dyn ToPayload> = vec![];
+    if let Some(msg) = &level.msg {
+        payloads.push(msg);
+    }
+    payloads.push(&bip138);
+    encrypt_to_level_keys(level, &payloads)
+}
+
+fn encrypt_to_level_keys(
+    level: &WrapLevel,
+    payloads: &[&dyn ToPayload],
+) -> Result<bip138::Encrypted, CliError> {
+    let keys = wrap_level_public_keys(level);
+    let paths = wrap_level_derivation_paths(level);
+    if keys.is_empty() {
+        return Err(CliError::NoKeys);
+    }
+    EncryptedBackup::new()
+        .set_payloads(&payloads)
+        .map_err(CliError::FailedToEncrypt)?
+        .set_derivation_paths(paths)
+        .set_keys(keys)
+        .encrypt()
+        .map_err(CliError::FailedToEncrypt)
+}
+
+fn wrap_level_public_keys(level: &WrapLevel) -> Vec<PublicKey> {
+    let mut keys = BTreeSet::new();
+    for key in &level.keys {
+        if let Ok(key) = bip138::descriptor::dpk_to_pk(key) {
+            keys.insert(key);
+            continue;
+        }
+        match key {
+            DescriptorPublicKey::XPub(key) => {
+                keys.insert(key.xkey.public_key);
+            }
+            DescriptorPublicKey::MultiXPub(key) => {
+                keys.insert(key.xkey.public_key);
+            }
+            DescriptorPublicKey::Single(_) => {}
+        }
+    }
+    keys.into_iter().collect()
+}
+
+fn wrap_level_derivation_paths(level: &WrapLevel) -> Vec<DerivationPath> {
+    let mut paths = BTreeSet::new();
+    for key in &level.keys {
+        match key {
+            DescriptorPublicKey::XPub(key) => {
+                if let Some((_, path)) = &key.origin {
+                    paths.insert(path.clone());
+                }
+            }
+            DescriptorPublicKey::MultiXPub(key) => {
+                if let Some((_, path)) = &key.origin {
+                    paths.insert(path.clone());
+                }
+            }
+            DescriptorPublicKey::Single(_) => {}
+        }
+    }
+    paths.into_iter().collect()
 }
 
 #[cfg(feature = "devices")]
@@ -665,6 +885,10 @@ fn hex_encode(bytes: &[u8]) -> String {
 mod tests {
     use super::*;
 
+    const KEY: &str = "[6738736c/84'/0'/2']xpub6CRQzb8u9dmMcq5XAwwRn9gcoYCjndJkhKgD11WKzbVGd932UmrExWFxCAvRnDN3ez6ZujLmMvmLBaSWdfWVn75L83Qxu1qSX4fJNrJg2Gt/<0;1>/*";
+    const OTHER_KEY: &str = "[b2b1f0cf/48'/0'/0'/2']xpub6EWhjpPa6FqrcaPBuGBZRJVjzGJ1ZsMygRF26RwN932Vfkn1gyCiTbECVitBjRCkexEvetLdiqzTcYimmzYxyR1BZ79KNevgt61PDcukmC7/<0;1>/*";
+    const BARE_TPUB: &str = "tpubDC5FSnBiZDMmkoat4aZFfbJdEthnPqJ1jXZcKWJNKC4yJanLA55dRW5qKJRRvAo1SwaXeUx2ayUQyVJ6eCbABbBB8Wn3T7dAuVJRnZgntVC";
+
     #[test]
     fn decrypted_to_document_joins_payloads_with_newline() {
         let document = decrypted_to_document(vec![
@@ -674,6 +898,106 @@ mod tests {
         .unwrap();
 
         assert_eq!(document, b"first\nsecond");
+    }
+
+    #[test]
+    fn decrypted_to_document_outputs_bip138_bytes() {
+        let document = decrypted_to_document(vec![
+            Decrypted::String("next".to_string()),
+            Decrypted::Bip138(vec![1, 2, 3]),
+        ])
+        .unwrap();
+
+        assert_eq!(document, b"next\n\x01\x02\x03");
+    }
+
+    #[test]
+    fn parse_wrap_keys_skips_empty_and_comment_lines() {
+        let levels =
+            parse_wrap_keys(&format!("\n# comment\nouter || {KEY}\n|| {KEY} | {KEY}\n")).unwrap();
+
+        assert_eq!(levels.len(), 2);
+        assert_eq!(levels[0].msg, Some("outer".to_string()));
+        assert_eq!(levels[0].keys.len(), 1);
+        assert_eq!(levels[1].msg, None);
+        assert_eq!(levels[1].keys.len(), 2);
+    }
+
+    #[test]
+    fn parse_wrap_keys_rejects_line_without_keys() {
+        let err = parse_wrap_keys("message || ").unwrap_err();
+
+        assert!(matches!(err, CliError::WrapKeys));
+    }
+
+    #[test]
+    fn parse_wrap_keys_rejects_xpub_without_origin() {
+        let err = parse_wrap_keys(&format!("Alice || {BARE_TPUB}")).unwrap_err();
+
+        assert!(matches!(err, CliError::WrapKeys));
+    }
+
+    #[cfg(feature = "devices")]
+    #[test]
+    fn origin_xpub_prefixes_fingerprint_and_path() {
+        let xpub = miniscript::bitcoin::bip32::Xpub::from_str(BARE_TPUB).unwrap();
+        let path = DerivationPath::from_str("48h/1h/0h").unwrap();
+        let fingerprint = Fingerprint::from_str("aabbccdd").unwrap();
+
+        assert_eq!(
+            origin_xpub(fingerprint, &path, &xpub),
+            format!("[aabbccdd/48'/1'/0']{BARE_TPUB}")
+        );
+    }
+
+    #[test]
+    fn encrypt_descriptor_level_uses_file_keys_only() {
+        let level = WrapLevel {
+            msg: None,
+            keys: vec![DescriptorPublicKey::from_str(KEY).unwrap()],
+        };
+        let descriptor =
+            Descriptor::<DescriptorPublicKey>::from_str(&format!("wpkh({OTHER_KEY})")).unwrap();
+
+        let encrypted = encrypt_descriptor_level(&level, None, &descriptor).unwrap();
+        let file_keys = wrap_level_public_keys(&level);
+        let descriptor_key = DescriptorPublicKey::from_str(OTHER_KEY).unwrap();
+        let (descriptor_keys, _) =
+            bip138::descriptor::dpks_to_derivation_keys_paths(&vec![descriptor_key]);
+
+        EncryptedBackup::new()
+            .set_encrypted_payload(&encrypted.bytes)
+            .unwrap()
+            .set_keys(file_keys)
+            .decrypt()
+            .unwrap();
+        let err = EncryptedBackup::new()
+            .set_encrypted_payload(&encrypted.bytes)
+            .unwrap()
+            .set_keys(descriptor_keys)
+            .decrypt()
+            .unwrap_err();
+
+        assert_eq!(err, bip138::Error::WrongKey);
+    }
+
+    #[test]
+    fn encrypt_level_stores_keys_file_origin_paths() {
+        let key = format!("[748f7513/48'/1'/0']{BARE_TPUB}");
+        let level = WrapLevel {
+            msg: None,
+            keys: vec![DescriptorPublicKey::from_str(&key).unwrap()],
+        };
+        let descriptor =
+            Descriptor::<DescriptorPublicKey>::from_str(&format!("wpkh({OTHER_KEY})")).unwrap();
+
+        let encrypted = encrypt_descriptor_level(&level, None, &descriptor).unwrap();
+        let metadata = EncryptedMetadata::from_encrypted_payload(&encrypted.bytes).unwrap();
+
+        assert_eq!(
+            metadata.derivation_paths,
+            vec![DerivationPath::from_str("48'/1'/0'").unwrap()]
+        );
     }
 
     #[cfg(feature = "devices")]

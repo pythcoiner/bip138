@@ -1,5 +1,10 @@
 [
   {
+    "description": "Bip 138",
+    "valid": true,
+    "content": "01008a"
+  },
+  {
     "description": "Bip 380",
     "valid": true,
     "content": "01017c"

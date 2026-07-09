@@ -65,6 +65,7 @@ pub enum Error {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Content {
     None,
+    Bip138,
     Bip139,
     Bip380,
     Bip388,
@@ -122,6 +123,7 @@ impl TryFrom<Content> for Vec<u8> {
         let mut out = match &value {
             Content::Unknown | Content::None => return Err(()),
             Content::Bip139
+            | Content::Bip138
             | Content::Bip380
             | Content::Bip388
             | Content::Bip329
@@ -141,6 +143,7 @@ impl TryFrom<Content> for Vec<u8> {
         out.append(&mut len);
         let mut data = match value {
             Content::None | Content::Unknown => vec![],
+            Content::Bip138 => 138u16.to_be_bytes().to_vec(),
             Content::Bip139 => 139u16.to_be_bytes().to_vec(),
             Content::Bip380 => 380u16.to_be_bytes().to_vec(),
             Content::Bip388 => 388u16.to_be_bytes().to_vec(),
@@ -164,6 +167,7 @@ pub fn parse_content(bytes: &[u8]) -> Result<(usize, Content), Error> {
             let bip_bytes: [u8; 2] = bytes[1..3].try_into().expect("2 bytes");
             let bip = u16::from_be_bytes(bip_bytes);
             let content = match bip {
+                138 => Content::Bip138,
                 139 => Content::Bip139,
                 380 => Content::Bip380,
                 388 => Content::Bip388,
@@ -205,7 +209,8 @@ impl Content {
     pub fn is_known(&self) -> bool {
         match self {
             Content::None | Content::Unknown | Content::Proprietary(_) => false,
-            Content::Bip139
+            Content::Bip138
+            | Content::Bip139
             | Content::Bip380
             | Content::Bip388
             | Content::Bip329
@@ -1294,6 +1299,9 @@ mod tests {
         // BIP139
         let (_, c) = parse_content(&[1, 0x00, 0x8B]).unwrap();
         assert_eq!(c, Content::Bip139);
+        // BIP138
+        let (_, c) = parse_content(&[1, 0x00, 0x8A]).unwrap();
+        assert_eq!(c, Content::Bip138);
         // Arbitrary BIPs
         let (_, c) = parse_content(&[1, 0xFF, 0xFF]).unwrap();
         assert_eq!(c, Content::BIP(u16::MAX));
@@ -1387,6 +1395,13 @@ mod tests {
         c = Content::BIP(139);
         serialized = c.try_into().unwrap();
         assert_eq!(serialized, vec![0x01, 0x00, 0x8B]);
+        // BIP 138
+        c = Content::Bip138;
+        serialized = c.try_into().unwrap();
+        assert_eq!(serialized, vec![0x01, 0x00, 0x8A]);
+        c = Content::BIP(138);
+        serialized = c.try_into().unwrap();
+        assert_eq!(serialized, vec![0x01, 0x00, 0x8A]);
     }
 
     #[test]
@@ -1406,6 +1421,8 @@ mod tests {
         c = Content::Bip329;
         assert!(c.is_known());
         c = Content::Bip139;
+        assert!(c.is_known());
+        c = Content::Bip138;
         assert!(c.is_known());
         c = Content::BIP(0);
         assert!(c.is_known());
@@ -2720,6 +2737,7 @@ mod content_vectors {
         }
 
         let expected = vec![
+            (Content::Bip138, "Bip 138".to_string()),
             (Content::Bip380, "Bip 380".to_string()),
             (Content::Bip388, "Bip 388".to_string()),
             (Content::Bip329, "Bip 329".to_string()),

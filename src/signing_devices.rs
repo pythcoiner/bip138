@@ -1,6 +1,6 @@
 use crate::miniscript::bitcoin::{
     Network,
-    bip32::{self, DerivationPath},
+    bip32::{self, DerivationPath, Fingerprint},
 };
 use async_hwi::{
     DeviceKind, HWI,
@@ -83,6 +83,12 @@ fn display_xpub(kind: DeviceKind, expect: Expect) -> bool {
 pub struct XpubCollection {
     pub xpubs: Vec<bip32::Xpub>,
     pub warnings: Vec<XpubWarning>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FetchedXpub {
+    pub fingerprint: Fingerprint,
+    pub xpub: bip32::Xpub,
 }
 
 pub struct XpubCollector {
@@ -269,8 +275,21 @@ where
 pub async fn fetch_first_xpub_at_path<F>(
     path: DerivationPath,
     network: Network,
-    mut log: F,
+    log: F,
 ) -> Result<Option<bip32::Xpub>, FetchFailed>
+where
+    F: FnMut(String) + Send,
+{
+    Ok(fetch_first_origin_xpub_at_path(path, network, log)
+        .await?
+        .map(|fetched| fetched.xpub))
+}
+
+pub async fn fetch_first_origin_xpub_at_path<F>(
+    path: DerivationPath,
+    network: Network,
+    mut log: F,
+) -> Result<Option<FetchedXpub>, FetchFailed>
 where
     F: FnMut(String) + Send,
 {
@@ -280,12 +299,21 @@ where
             let expect = fetch_path_expect(device_kind, network, &path);
             log(format!("Fetching xpubs on {device_kind:?}"));
             unlock_bitbox(&*device, network, &mut log).await?;
+            let fingerprint = device
+                .get_master_fingerprint()
+                .await
+                .map_err(|e| FetchFailed {
+                    device: device_kind,
+                    path: path.clone(),
+                    expect,
+                    error: e.to_string(),
+                })?;
             log(format!(
                 "Fetching {path} on {device_kind:?} with {expect:?} timeout {PROMPT_TIMEOUT:?}"
             ));
             device.display(display_xpub(device_kind, expect));
             return match timeout(PROMPT_TIMEOUT, device.get_extended_pubkey(&path)).await {
-                Ok(Ok(xpub)) => Ok(Some(xpub)),
+                Ok(Ok(xpub)) => Ok(Some(FetchedXpub { fingerprint, xpub })),
                 Ok(Err(e)) => Err(FetchFailed {
                     device: device_kind,
                     path,

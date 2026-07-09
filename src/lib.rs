@@ -106,6 +106,24 @@ impl ToPayload for String {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Bip138(pub Vec<u8>);
+
+impl ToPayload for Bip138 {
+    fn to_payload(&self) -> Result<Vec<u8>, Error> {
+        Ok(self.0.clone())
+    }
+    fn content_type(&self) -> Content {
+        Content::Bip138
+    }
+    fn derivation_paths(&self) -> Result<Vec<DerivationPath>, Error> {
+        Ok(vec![])
+    }
+    fn keys(&self) -> Result<Vec<secp256k1::PublicKey>, Error> {
+        Ok(vec![])
+    }
+}
+
 impl ToPayload for Descriptor<DescriptorPublicKey> {
     fn to_payload(&self) -> Result<Vec<u8>, Error> {
         Ok(self.to_string().as_bytes().to_vec())
@@ -229,6 +247,7 @@ pub enum Decrypted {
     Labels,
     WalletBackup(Vec<u8>),
     String(String),
+    Bip138(Vec<u8>),
     Raw(Vec<u8>),
 }
 
@@ -485,6 +504,7 @@ impl EncryptedBackup {
                 let string = String::from_utf8(bytes).map_err(|_| Error::Utf8)?;
                 Ok(Decrypted::String(string))
             }
+            Content::Bip138 => Ok(Decrypted::Bip138(bytes)),
             Content::Bip380 => {
                 // Try a bare descriptor first; fall back to a JSON descriptor
                 // backup document if it is not a descriptor.
@@ -635,6 +655,83 @@ mod string_tests {
                 Decrypted::String(msg),
                 Decrypted::Descriptor(Box::new(descriptor))
             ]
+        );
+    }
+
+    #[test]
+    fn bip138_roundtrip() {
+        let payload = Bip138(vec![1, 2, 3]);
+        let bytes = EncryptedBackup::new()
+            .set_payload(&payload)
+            .unwrap()
+            .set_keys(vec![test_key(1)])
+            .encrypt()
+            .unwrap()
+            .bytes;
+
+        let restored = EncryptedBackup::new()
+            .set_encrypted_payload(&bytes)
+            .unwrap()
+            .set_keys(vec![test_key(1)])
+            .decrypt()
+            .unwrap();
+
+        assert_eq!(restored, vec![Decrypted::Bip138(vec![1, 2, 3])]);
+    }
+
+    #[test]
+    fn bip138_wrapping_decrypts_one_level_at_a_time() {
+        let descriptor = descriptor::tests::descr_1();
+        let base = EncryptedBackup::new()
+            .set_payload(&descriptor)
+            .unwrap()
+            .encrypt()
+            .unwrap()
+            .bytes;
+        let inner_msg = String::from("inner");
+        let inner = Bip138(base.clone());
+        let inner_payloads: [&dyn ToPayload; 2] = [&inner_msg, &inner];
+        let inner = EncryptedBackup::new()
+            .set_payloads(&inner_payloads)
+            .unwrap()
+            .set_keys(vec![test_key(2)])
+            .encrypt()
+            .unwrap()
+            .bytes;
+        let outer_msg = String::from("outer");
+        let outer = Bip138(inner.clone());
+        let outer_payloads: [&dyn ToPayload; 2] = [&outer_msg, &outer];
+        let outer = EncryptedBackup::new()
+            .set_payloads(&outer_payloads)
+            .unwrap()
+            .set_keys(vec![test_key(3)])
+            .encrypt()
+            .unwrap()
+            .bytes;
+
+        let restored_outer = EncryptedBackup::new()
+            .set_encrypted_payload(&outer)
+            .unwrap()
+            .set_keys(vec![test_key(3)])
+            .decrypt()
+            .unwrap();
+        assert_eq!(
+            restored_outer,
+            vec![
+                Decrypted::String(outer_msg),
+                Decrypted::Bip138(inner.clone())
+            ]
+        );
+
+        let restored_inner = EncryptedBackup::new()
+            .set_encrypted_payload(&inner)
+            .unwrap()
+            .set_keys(vec![test_key(2)])
+            .decrypt()
+            .unwrap();
+        assert_eq!(
+            restored_inner,
+            vec![Decrypted::String(inner_msg), Decrypted::Bip138(base)]
         );
     }
 
