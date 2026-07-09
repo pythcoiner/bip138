@@ -131,6 +131,21 @@ enum Commands {
         #[arg(short, long)]
         file: Option<String>,
     },
+
+    /// Fetch an xpub from a signing device at a derivation path
+    #[cfg(feature = "devices")]
+    Fetch {
+        /// Derivation path to fetch
+        derivation: String,
+
+        /// File to append the xpub to
+        #[arg(short, long)]
+        file: Option<String>,
+
+        /// Fetch from a testnet signing device
+        #[arg(long)]
+        testnet: bool,
+    },
 }
 
 #[tokio::main]
@@ -472,8 +487,53 @@ async fn main() -> Result<(), CliError> {
             let json = serde_json::to_string_pretty(&json).map_err(CliError::JsonError)?;
             println!("{json}");
         }
+        #[cfg(feature = "devices")]
+        Commands::Fetch {
+            derivation,
+            file,
+            testnet,
+        } => {
+            let path = DerivationPath::from_str(derivation.trim())
+                .map_err(|err| CliError::InvalidDeviceDerivationPath(err.to_string()))?;
+            let network = if *testnet {
+                Network::Testnet
+            } else {
+                device_network(core::slice::from_ref(&path))
+            };
+            let xpub = bip138::signing_devices::fetch_first_xpub_at_path(
+                path,
+                network,
+                fetch_log_to_stderr,
+            )
+            .await
+            .map_err(CliError::FailedToFetchXpub)?
+            .ok_or(CliError::NoKeys)?;
+
+            match file {
+                Some(path) => append_line(path, &xpub.to_string())?,
+                None => println!("{xpub}"),
+            }
+        }
     }
     Ok(())
+}
+
+#[cfg(feature = "devices")]
+fn fetch_log_to_stderr(msg: String) {
+    eprintln!("{msg}");
+    if let Err(err) = std::io::stderr().flush() {
+        eprintln!("warning: cannot flush stderr: {err:?}");
+    }
+}
+
+#[cfg(feature = "devices")]
+fn append_line(path: &str, line: &str) -> Result<(), CliError> {
+    let mut file = fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)
+        .map_err(CliError::OpenError)?;
+    writeln!(file, "{line}").map_err(CliError::WriteError)
 }
 
 #[cfg(feature = "devices")]
@@ -614,5 +674,18 @@ mod tests {
         .unwrap();
 
         assert_eq!(document, b"first\nsecond");
+    }
+
+    #[cfg(feature = "devices")]
+    #[test]
+    fn append_line_appends_new_line() {
+        let path = env::temp_dir().join(format!("bip138-fetch-append-{}.txt", std::process::id()));
+        let _ = fs::remove_file(&path);
+
+        append_line(path.to_str().unwrap(), "first").unwrap();
+        append_line(path.to_str().unwrap(), "second").unwrap();
+
+        assert_eq!(fs::read_to_string(&path).unwrap(), "first\nsecond\n");
+        fs::remove_file(path).unwrap();
     }
 }

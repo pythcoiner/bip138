@@ -277,7 +277,7 @@ where
     if let Ok(devices) = list(network).await {
         if let Some(device) = devices.into_iter().next() {
             let device_kind = device.device_kind();
-            let expect = crate::ll::common_derivation_path_expect(device_kind, &path);
+            let expect = fetch_path_expect(device_kind, network, &path);
             log(format!("Fetching xpubs on {device_kind:?}"));
             unlock_bitbox(&*device, network, &mut log).await?;
             log(format!(
@@ -303,6 +303,18 @@ where
     }
 
     Ok(None)
+}
+
+fn fetch_path_expect(kind: DeviceKind, network: Network, path: &DerivationPath) -> Expect {
+    let common = crate::ll::common_derivation_paths(kind, network)
+        .into_iter()
+        .any(|(common_path, _)| common_path == *path);
+    match (kind, common) {
+        (DeviceKind::Ledger | DeviceKind::LedgerSimulator | DeviceKind::BitBox02, false) => {
+            Expect::PromptUser
+        }
+        _ => crate::ll::common_derivation_path_expect(kind, path),
+    }
 }
 
 async fn unlock_bitbox<L>(
@@ -472,6 +484,47 @@ mod tests {
         assert!(display_xpub(DeviceKind::LedgerSimulator, Expect::CanFail));
         assert!(!display_xpub(DeviceKind::Ledger, Expect::MustFetch));
         assert!(!display_xpub(DeviceKind::BitBox02, Expect::CanFail));
+    }
+
+    #[test]
+    fn ledger_explicit_fetch_prompts_for_non_common_path() {
+        let path = DerivationPath::from_str("48h/1h/0h").unwrap();
+
+        assert_eq!(
+            fetch_path_expect(DeviceKind::Ledger, Network::Testnet, &path),
+            Expect::PromptUser
+        );
+        assert!(display_xpub(DeviceKind::Ledger, Expect::PromptUser));
+    }
+
+    #[test]
+    fn ledger_explicit_fetch_keeps_common_path_expectation() {
+        let path = DerivationPath::from_str("48h/1h/0h/1h").unwrap();
+
+        assert_eq!(
+            fetch_path_expect(DeviceKind::Ledger, Network::Testnet, &path),
+            Expect::MustFetch
+        );
+    }
+
+    #[test]
+    fn bitbox_explicit_fetch_prompts_for_non_common_path() {
+        let path = DerivationPath::from_str("48h/1h/0h").unwrap();
+
+        assert_eq!(
+            fetch_path_expect(DeviceKind::BitBox02, Network::Testnet, &path),
+            Expect::PromptUser
+        );
+    }
+
+    #[test]
+    fn bitbox_explicit_fetch_keeps_common_path_expectation() {
+        let path = DerivationPath::from_str("48h/1h/0h/1h").unwrap();
+
+        assert_eq!(
+            fetch_path_expect(DeviceKind::BitBox02, Network::Testnet, &path),
+            Expect::MustFetch
+        );
     }
 
     #[test]
