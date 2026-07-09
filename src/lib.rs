@@ -238,6 +238,9 @@ pub enum Payload {
     Encrypt {
         payload: Vec<u8>,
     },
+    EncryptMany {
+        payloads: Vec<(Content, Vec<u8>)>,
+    },
     DecryptV1 {
         cyphertext: Vec<u8>,
         individual_secrets: Vec<[u8; 32]>,
@@ -344,6 +347,24 @@ impl EncryptedBackup {
         self.warnings.append(&mut payload.warnings()?);
         Ok(self)
     }
+    pub fn set_payloads(mut self, payloads: &[&dyn ToPayload]) -> Result<Self, Error> {
+        let mut encrypted_payloads = Vec::with_capacity(payloads.len());
+        for payload in payloads {
+            let content = payload.content_type();
+            if !content.is_known() {
+                return Err(Error::UnknownContent);
+            }
+            encrypted_payloads.push((content, payload.to_payload()?));
+            self.derivation_paths
+                .append(&mut payload.derivation_paths()?);
+            self.keys.append(&mut payload.keys()?);
+            self.warnings.append(&mut payload.warnings()?);
+        }
+        self.payload = Payload::EncryptMany {
+            payloads: encrypted_payloads,
+        };
+        Ok(self)
+    }
     pub fn get_warnings(&self) -> &[Warning] {
         &self.warnings
     }
@@ -352,7 +373,8 @@ impl EncryptedBackup {
         #[cfg(not(feature = "rand"))] nonce: [u8; 12],
         #[cfg(not(feature = "rand"))] decoy_individual_secrets: &[[u8; 32]],
     ) -> Result<Encrypted, Error> {
-        if self.content == Content::Unknown {
+        if self.content == Content::Unknown && !matches!(self.payload, Payload::EncryptMany { .. })
+        {
             return Err(Error::UnknownContent);
         }
         if !self.encryption.is_defined() {
@@ -361,26 +383,39 @@ impl EncryptedBackup {
         if !self.version.is_valid() {
             return Err(Error::InvalidVersion);
         }
-        let bytes = if let Payload::Encrypt { payload } = &self.payload {
-            payload.clone()
-        } else {
-            return Err(Error::WrongPayload);
-        };
-
         let warnings = self.warnings.clone();
         match (self.encryption, self.version) {
             (Encryption::ChaCha20Poly1305, Version::V1) => {
-                let bytes = ll::encrypt_chacha20_poly1305_v1(
-                    self.derivation_paths,
-                    self.content.clone(),
-                    self.keys,
-                    &bytes,
-                    self.padding,
-                    #[cfg(not(feature = "rand"))]
-                    nonce,
-                    #[cfg(not(feature = "rand"))]
-                    decoy_individual_secrets,
-                )?;
+                let bytes = match &self.payload {
+                    Payload::Encrypt { payload } => ll::encrypt_chacha20_poly1305_v1(
+                        self.derivation_paths,
+                        self.content.clone(),
+                        self.keys,
+                        payload,
+                        self.padding,
+                        #[cfg(not(feature = "rand"))]
+                        nonce,
+                        #[cfg(not(feature = "rand"))]
+                        decoy_individual_secrets,
+                    )?,
+                    Payload::EncryptMany { payloads } => {
+                        let payloads = payloads
+                            .iter()
+                            .map(|(content, payload)| (content.clone(), payload.as_slice()))
+                            .collect::<Vec<_>>();
+                        ll::encrypt_chacha20_poly1305_v1_items(
+                            self.derivation_paths,
+                            &payloads,
+                            self.keys,
+                            self.padding,
+                            #[cfg(not(feature = "rand"))]
+                            nonce,
+                            #[cfg(not(feature = "rand"))]
+                            decoy_individual_secrets,
+                        )?
+                    }
+                    _ => return Err(Error::WrongPayload),
+                };
                 Ok(Encrypted { bytes, warnings })
             }
             _ => Err(Error::NotImplemented),
@@ -492,7 +527,9 @@ impl EncryptedBackup {
         }
         match self.version {
             Version::V1 => match &self.payload {
-                Payload::None | Payload::Encrypt { .. } => Err(Error::WrongPayload),
+                Payload::None | Payload::Encrypt { .. } | Payload::EncryptMany { .. } => {
+                    Err(Error::WrongPayload)
+                }
                 Payload::DecryptV1 {
                     cyphertext,
                     individual_secrets,
@@ -574,6 +611,31 @@ mod string_tests {
             .unwrap();
 
         assert_eq!(restored, vec![Decrypted::String(payload)]);
+    }
+
+    #[test]
+    fn string_before_descriptor_roundtrip() {
+        let msg = String::from("backup note");
+        let descriptor = descriptor::tests::descr_1();
+        let payloads: [&dyn ToPayload; 2] = [&msg, &descriptor];
+        let backup = EncryptedBackup::new().set_payloads(&payloads).unwrap();
+        let keys = backup.get_keys();
+        let bytes = backup.encrypt().unwrap().bytes;
+
+        let restored = EncryptedBackup::new()
+            .set_encrypted_payload(&bytes)
+            .unwrap()
+            .set_keys(keys)
+            .decrypt()
+            .unwrap();
+
+        assert_eq!(
+            restored,
+            vec![
+                Decrypted::String(msg),
+                Decrypted::Descriptor(Box::new(descriptor))
+            ]
+        );
     }
 
     fn test_key(tag: u8) -> secp256k1::PublicKey {

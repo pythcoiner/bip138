@@ -684,26 +684,70 @@ fn encrypt_chacha20_poly1305_v1_with_nonce(
     padding: Padding,
     #[cfg(not(feature = "rand"))] decoy_individual_secrets: &[[u8; 32]],
 ) -> Result<Vec<u8>, Error> {
-    // NOTE: RFC 8439 caps ChaCha20-Poly1305 plaintext at 2^38 - 64 bytes, but we
-    // limit it to u32::MAX so the length never exceeds usize::MAX on 32-bit
-    // architectures.
-    // https://datatracker.ietf.org/doc/html/rfc8439#section-2.8
-    if data.len() > u32::MAX as usize {
-        return Err(Error::DataLength);
-    }
-    if data.is_empty() {
-        return Err(Error::DataLength);
-    }
+    encrypt_chacha20_poly1305_v1_items_with_nonce(
+        derivation_paths,
+        &[(content_metadata, data)],
+        keys,
+        nonce,
+        #[cfg(not(feature = "rand"))]
+        decoy_individual_secrets,
+        padding,
+    )
+}
 
-    let content_metadata: Vec<u8> = content_metadata
-        .try_into()
-        .map_err(|_| Error::ContentMetadata)?;
-    if content_metadata.is_empty() {
-        return Err(Error::ContentMetadata);
-    }
+pub(crate) fn encrypt_chacha20_poly1305_v1_items(
+    derivation_paths: Vec<DerivationPath>,
+    items: &[(Content, &[u8])],
+    keys: Vec<secp256k1::PublicKey>,
+    padding: Padding,
+    #[cfg(not(feature = "rand"))] nonce: [u8; 12],
+    #[cfg(not(feature = "rand"))] decoy_individual_secrets: &[[u8; 32]],
+) -> Result<Vec<u8>, Error> {
+    #[cfg(feature = "rand")]
+    let nonce = nonce();
+    encrypt_chacha20_poly1305_v1_items_with_nonce(
+        derivation_paths,
+        items,
+        keys,
+        nonce,
+        #[cfg(not(feature = "rand"))]
+        decoy_individual_secrets,
+        padding,
+    )
+}
 
-    // <PAYLOAD> = (<CONTENT_METADATA><LENGTH><PLAINTEXT>)+ (<PADDING>)
-    let payload = encode_plaintext(&[(&content_metadata, data)], padding)?;
+fn encrypt_chacha20_poly1305_v1_items_with_nonce(
+    derivation_paths: Vec<DerivationPath>,
+    items: &[(Content, &[u8])],
+    keys: Vec<secp256k1::PublicKey>,
+    nonce: [u8; 12],
+    #[cfg(not(feature = "rand"))] decoy_individual_secrets: &[[u8; 32]],
+    padding: Padding,
+) -> Result<Vec<u8>, Error> {
+    let mut metadata = Vec::with_capacity(items.len());
+    for (content, data) in items {
+        // NOTE: RFC 8439 caps ChaCha20-Poly1305 plaintext at 2^38 - 64 bytes, but we
+        // limit it to u32::MAX so the length never exceeds usize::MAX on 32-bit
+        // architectures.
+        // https://datatracker.ietf.org/doc/html/rfc8439#section-2.8
+        if data.len() > u32::MAX as usize || data.is_empty() {
+            return Err(Error::DataLength);
+        }
+
+        let content_metadata: Vec<u8> = content
+            .clone()
+            .try_into()
+            .map_err(|_| Error::ContentMetadata)?;
+        if content_metadata.is_empty() {
+            return Err(Error::ContentMetadata);
+        }
+        metadata.push((content_metadata, *data));
+    }
+    let items = metadata
+        .iter()
+        .map(|(content, data)| (content.as_slice(), *data))
+        .collect::<Vec<_>>();
+    let payload = encode_plaintext(&items, padding)?;
     encode_v1_backup(
         derivation_paths,
         keys,

@@ -90,6 +90,10 @@ enum Commands {
         #[arg(short, long)]
         output: Option<String>,
 
+        /// Message to add before the descriptor payload
+        #[arg(long)]
+        msg: Option<String>,
+
         /// Add a signing-device key to the encryption key set
         #[cfg(feature = "devices")]
         #[arg(long, num_args = 0..=1, value_name = "PATH")]
@@ -138,6 +142,7 @@ async fn main() -> Result<(), CliError> {
         Commands::Encrypt {
             file,
             output,
+            msg,
             #[cfg(feature = "devices")]
             device,
         } => {
@@ -174,9 +179,14 @@ async fn main() -> Result<(), CliError> {
                 .map_err(CliError::CantConvertToDescriptor)?;
 
             // encrypt the descriptor
-            let backup = EncryptedBackup::new()
-                .set_payload(&descriptor)
-                .map_err(CliError::FailedToEncrypt)?;
+            let backup = match msg {
+                Some(msg) => {
+                    let payloads: [&dyn ToPayload; 2] = [msg, &descriptor];
+                    EncryptedBackup::new().set_payloads(&payloads)
+                }
+                None => EncryptedBackup::new().set_payload(&descriptor),
+            }
+            .map_err(CliError::FailedToEncrypt)?;
             #[cfg(feature = "devices")]
             let mut used_deriv_paths = backup.get_derivation_paths();
             #[cfg(not(feature = "devices"))]
@@ -419,16 +429,7 @@ async fn main() -> Result<(), CliError> {
                     .set_keys(pks)
                     .decrypt()
                     .map_err(CliError::FailedToDecrypt)?;
-                match decrypted.into_iter().next() {
-                    Some(Decrypted::Descriptor(descr)) => descr.to_string().into_bytes(),
-                    Some(Decrypted::DescriptorBackup(backup)) => {
-                        backup.to_payload().map_err(CliError::FailedToDecrypt)?
-                    }
-                    Some(Decrypted::PolicyBackup(backup)) => {
-                        backup.to_payload().map_err(CliError::FailedToDecrypt)?
-                    }
-                    _ => return Err(CliError::Content),
-                }
+                decrypted_to_document(decrypted)?
             };
             fs::write(&output_path, &document).map_err(CliError::WriteError)?;
             println!("descriptor written to {output_path:?}");
@@ -556,16 +557,25 @@ fn device_network(deriv_paths: &[DerivationPath]) -> Network {
     }
 }
 
-#[cfg(feature = "devices")]
 fn decrypted_to_document(decrypted: Vec<Decrypted>) -> Result<Vec<u8>, CliError> {
-    match decrypted.into_iter().next() {
-        Some(Decrypted::Descriptor(descr)) => Ok(descr.to_string().into_bytes()),
-        Some(Decrypted::DescriptorBackup(backup)) => {
+    let mut document = Vec::new();
+    for decrypted in decrypted {
+        if !document.is_empty() {
+            document.push(b'\n');
+        }
+        document.extend(decrypted_to_bytes(decrypted)?);
+    }
+    Ok(document)
+}
+
+fn decrypted_to_bytes(decrypted: Decrypted) -> Result<Vec<u8>, CliError> {
+    match decrypted {
+        Decrypted::Descriptor(descr) => Ok(descr.to_string().into_bytes()),
+        Decrypted::DescriptorBackup(backup) => {
             backup.to_payload().map_err(CliError::FailedToDecrypt)
         }
-        Some(Decrypted::PolicyBackup(backup)) => {
-            backup.to_payload().map_err(CliError::FailedToDecrypt)
-        }
+        Decrypted::PolicyBackup(backup) => backup.to_payload().map_err(CliError::FailedToDecrypt),
+        Decrypted::String(msg) => Ok(msg.into_bytes()),
         _ => Err(CliError::Content),
     }
 }
@@ -589,4 +599,20 @@ fn hex_encode(bytes: &[u8]) -> String {
         write!(&mut out, "{byte:02x}").expect("writing to string must not fail");
     }
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn decrypted_to_document_joins_payloads_with_newline() {
+        let document = decrypted_to_document(vec![
+            Decrypted::String("first".to_string()),
+            Decrypted::String("second".to_string()),
+        ])
+        .unwrap();
+
+        assert_eq!(document, b"first\nsecond");
+    }
 }
