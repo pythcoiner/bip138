@@ -118,6 +118,92 @@ impl ToPayload for Descriptor<DescriptorPublicKey> {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EncryptedMetadata {
+    pub version: Version,
+    pub derivation_paths: Vec<DerivationPath>,
+    pub individual_secrets: Vec<[u8; 32]>,
+    pub encryption: Encryption,
+    pub nonce: [u8; 12],
+    pub ciphertext_lens: Vec<usize>,
+}
+
+impl EncryptedMetadata {
+    pub fn from_encrypted_payload(bytes: &[u8]) -> Result<Self, Error> {
+        if bytes.starts_with(ll::MAGIC.as_bytes()) {
+            return Self::from_binary_encrypted_payload(bytes);
+        }
+        #[cfg(feature = "v0")]
+        if bytes.starts_with(V0_MAGIC) {
+            return Self::from_binary_encrypted_payload(bytes);
+        }
+        #[cfg(feature = "base64")]
+        {
+            use base64::Engine as _;
+            let text = core::str::from_utf8(bytes).map_err(|_| Error::Base64)?;
+            let decoded = base64::engine::general_purpose::STANDARD
+                .decode(text.trim())
+                .map_err(|_| Error::Base64)?;
+            Self::from_binary_encrypted_payload(&decoded)
+        }
+        #[cfg(not(feature = "base64"))]
+        Self::from_binary_encrypted_payload(bytes)
+    }
+
+    fn from_binary_encrypted_payload(bytes: &[u8]) -> Result<Self, Error> {
+        #[cfg(feature = "v0")]
+        if bytes.starts_with(V0_MAGIC) {
+            return Self::from_v0_binary_encrypted_payload(bytes);
+        }
+        let version: Version = ll::decode_version(bytes).map(|v| v.into())?;
+        match version {
+            Version::V1 => {
+                let (derivation_paths, individual_secrets, encryption, nonce, _ciphertext) =
+                    ll::decode_v1(bytes)?;
+                let ciphertext_lens = ll::decode_v1_encrypted_payload_lengths(bytes)?;
+                Ok(Self {
+                    version,
+                    derivation_paths,
+                    individual_secrets,
+                    encryption: encryption.into(),
+                    nonce,
+                    ciphertext_lens,
+                })
+            }
+            _ => Err(Error::NotImplemented),
+        }
+    }
+
+    #[cfg(feature = "v0")]
+    fn from_v0_binary_encrypted_payload(bytes: &[u8]) -> Result<Self, Error> {
+        let mut offset = V0_MAGIC.len();
+        let (incr, version) = ll::parse_version(&bytes[offset..])?;
+        offset = ll::increment_offset(bytes, offset, incr)?;
+        let (incr, derivation_paths) = ll::parse_derivation_paths(&bytes[offset..])?;
+        offset = ll::increment_offset(bytes, offset, incr)?;
+        let (incr, individual_secrets) = ll::parse_individual_secrets(&bytes[offset..])?;
+        offset = ll::increment_offset(bytes, offset, incr)?;
+        let (incr, encryption) = ll::parse_encryption(&bytes[offset..])?;
+        offset = ll::increment_offset(bytes, offset, incr)?;
+        let (nonce, ciphertext) = ll::parse_encrypted_payload(&bytes[offset..])?;
+
+        if !matches!(Version::from(version), Version::V0 | Version::V1)
+            || encryption != V0_AES_GCM_256
+        {
+            return Err(Error::NotImplemented);
+        }
+
+        Ok(Self {
+            version: Version::V0,
+            derivation_paths,
+            individual_secrets,
+            encryption: Encryption::AesGcm256,
+            nonce,
+            ciphertext_lens: vec![ciphertext.len()],
+        })
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Decrypted {
     Descriptor(Box<Descriptor<DescriptorPublicKey>>),
     #[cfg(feature = "descriptor_backup")]
@@ -450,10 +536,14 @@ impl EncryptedBackup {
 #[cfg(feature = "v0")]
 const V0_MAGIC: &[u8] = b"BEB";
 
+#[cfg(feature = "v0")]
+const V0_AES_GCM_256: u8 = 1;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Encryption {
     Undefined,
     ChaCha20Poly1305,
+    AesGcm256,
     Unknown,
 }
 
@@ -472,6 +562,7 @@ impl From<Encryption> for u8 {
         match value {
             Encryption::Undefined => 0x00,
             Encryption::ChaCha20Poly1305 => 0x01,
+            Encryption::AesGcm256 => 0x01,
             Encryption::Unknown => 0xFF,
         }
     }
@@ -481,7 +572,7 @@ impl Encryption {
     pub fn is_defined(&self) -> bool {
         match self {
             Encryption::Undefined | Encryption::Unknown => false,
-            Encryption::ChaCha20Poly1305 => true,
+            Encryption::AesGcm256 | Encryption::ChaCha20Poly1305 => true,
         }
     }
 }
@@ -580,6 +671,29 @@ mod tests {
             .decrypt()
             .unwrap();
         assert_eq!(restored, vec![Decrypted::Descriptor(Box::new(descriptor))]);
+    }
+
+    #[test]
+    fn test_metadata_lists_encrypted_payload_lengths() {
+        let bytes = ll::encode_v1(
+            0x01,
+            ll::encode_derivation_paths(vec![]).unwrap(),
+            ll::encode_individual_secrets(&[[1u8; 32]]).unwrap(),
+            0x01,
+            [
+                ll::encode_encrypted_payload([2u8; 12], &[3u8; 7]).unwrap(),
+                ll::encode_encrypted_payload([4u8; 12], &[5u8; 11]).unwrap(),
+            ]
+            .concat(),
+        );
+
+        let metadata = EncryptedMetadata::from_encrypted_payload(&bytes).unwrap();
+
+        assert_eq!(metadata.version, Version::V1);
+        assert_eq!(metadata.encryption, Encryption::ChaCha20Poly1305);
+        assert_eq!(metadata.individual_secrets, vec![[1u8; 32]]);
+        assert_eq!(metadata.nonce, [2u8; 12]);
+        assert_eq!(metadata.ciphertext_lens, vec![7, 11]);
     }
 
     #[test]
@@ -1460,6 +1574,25 @@ mod v0_tests {
     }
 
     #[test]
+    fn test_v0_metadata() {
+        let (descriptor, _) = descriptor_and_key();
+        let backup = v0::EncryptedBackup::new().set_payload(&descriptor).unwrap();
+        let derivation_paths = backup.get_derivation_paths();
+        let key_count = backup.get_keys().len();
+        let bytes = backup.encrypt(NONCE).unwrap();
+
+        let metadata = EncryptedMetadata::from_encrypted_payload(&bytes).unwrap();
+
+        assert_eq!(metadata.version, Version::V0);
+        assert_eq!(metadata.encryption, Encryption::AesGcm256);
+        assert_eq!(metadata.derivation_paths, derivation_paths);
+        assert_eq!(metadata.individual_secrets.len(), key_count);
+        assert_eq!(metadata.nonce, NONCE);
+        assert_eq!(metadata.ciphertext_lens.len(), 1);
+        assert!(metadata.ciphertext_lens[0] > 0);
+    }
+
+    #[test]
     fn test_v0_wrong_key_surfaces_wrong_key() {
         let (descriptor, _) = descriptor_and_key();
         let bytes = v0::EncryptedBackup::new()
@@ -1526,6 +1659,27 @@ mod v0_tests {
             .decrypt()
             .unwrap();
         assert_eq!(restored, vec![Decrypted::Descriptor(Box::new(descriptor))]);
+    }
+
+    #[cfg(feature = "base64")]
+    #[test]
+    fn test_v0_base64_metadata() {
+        use base64::Engine as _;
+        let (descriptor, _) = descriptor_and_key();
+        let bytes = v0::EncryptedBackup::new()
+            .set_payload(&descriptor)
+            .unwrap()
+            .encrypt(NONCE)
+            .unwrap();
+        let b64 = base64::engine::general_purpose::STANDARD.encode(&bytes);
+
+        let metadata = EncryptedMetadata::from_encrypted_payload(b64.as_bytes()).unwrap();
+
+        assert_eq!(metadata.version, Version::V0);
+        assert_eq!(metadata.encryption, Encryption::AesGcm256);
+        assert_eq!(metadata.nonce, NONCE);
+        assert_eq!(metadata.ciphertext_lens.len(), 1);
+        assert!(metadata.ciphertext_lens[0] > 0);
     }
 
     #[test]

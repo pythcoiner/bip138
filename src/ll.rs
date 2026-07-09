@@ -620,6 +620,26 @@ pub fn decode_v1(
     ),
     Error,
 > {
+    let (offset, derivation_paths, individual_secrets, encryption_type) = parse_v1_header(bytes)?;
+    // <ENCRYPTED_PAYLOAD>
+    let (nonce, cyphertext) = parse_encrypted_payload(&bytes[offset..])?;
+
+    Ok((
+        derivation_paths,
+        individual_secrets,
+        encryption_type,
+        nonce,
+        cyphertext,
+    ))
+}
+
+pub fn decode_v1_encrypted_payload_lengths(bytes: &[u8]) -> Result<Vec<usize>, Error> {
+    let (offset, _, _, _) = parse_v1_header(bytes)?;
+    parse_encrypted_payload_lengths(&bytes[offset..])
+}
+
+#[allow(clippy::type_complexity)]
+fn parse_v1_header(bytes: &[u8]) -> Result<(usize, Vec<DerivationPath>, Vec<[u8; 32]>, u8), Error> {
     // <MAGIC>
     let mut offset = init_offset(bytes, parse_magic_byte(bytes)?)?;
     // <VERSION>
@@ -634,15 +654,11 @@ pub fn decode_v1(
     // <ENCRYPTION>
     let (incr, encryption_type) = parse_encryption(&bytes[offset..])?;
     offset = increment_offset(bytes, offset, incr)?;
-    // <ENCRYPTED_PAYLOAD>
-    let (nonce, cyphertext) = parse_encrypted_payload(&bytes[offset..])?;
-
     Ok((
+        offset,
         derivation_paths,
         individual_secrets,
         encryption_type,
-        nonce,
-        cyphertext,
     ))
 }
 
@@ -999,6 +1015,38 @@ pub fn parse_encrypted_payload(
     check_offset_lookahead(offset, bytes, data_len)?;
     let cyphertext = bytes[offset..offset + data_len].to_vec();
     Ok((nonce, cyphertext))
+}
+
+pub fn parse_encrypted_payload_lengths(bytes: &[u8]) -> Result<Vec<usize>, Error> {
+    if bytes.is_empty() {
+        return Err(Error::EmptyBytes);
+    }
+
+    let mut lengths = Vec::new();
+    let mut offset = 0usize;
+    while offset < bytes.len() {
+        check_offset_lookahead(offset, bytes, 12)?;
+        let nonce: [u8; 12] = bytes[offset..offset + 12].try_into().expect("checked");
+        if nonce == [0u8; 12] {
+            return Err(Error::ZeroedNonce);
+        }
+        offset = offset.checked_add(12).ok_or(Error::OffsetOverflow)?;
+
+        let (VarInt(data_len), incr) = parse_varint(&bytes[offset..]).ok_or(Error::VarInt)?;
+        let data_len = usize::try_from(data_len).map_err(|_| Error::DataLength)?;
+        if data_len == 0 {
+            return Err(Error::CypherTextEmpty);
+        }
+        offset = offset.checked_add(incr).ok_or(Error::OffsetOverflow)?;
+        let end = offset.checked_add(data_len).ok_or(Error::OffsetOverflow)?;
+        if end > bytes.len() {
+            return Err(Error::Corrupted);
+        }
+        lengths.push(data_len);
+        offset = end;
+    }
+
+    Ok(lengths)
 }
 
 fn parse_varint(bytes: &[u8]) -> Option<(VarInt, usize)> {

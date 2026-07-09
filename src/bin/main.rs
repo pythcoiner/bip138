@@ -2,7 +2,7 @@ use bip138::miniscript;
 
 use clap::{Parser, Subcommand};
 
-use bip138::{Decrypted, EncryptedBackup, ToPayload};
+use bip138::{Decrypted, EncryptedBackup, EncryptedMetadata, ToPayload};
 #[cfg(feature = "devices")]
 use miniscript::bitcoin::{Network, bip32::DerivationPath, secp256k1::PublicKey};
 use miniscript::{Descriptor, DescriptorPublicKey, descriptor::DescriptorKeyParseError};
@@ -37,6 +37,8 @@ pub enum CliError {
     ReadError(std::io::Error),
     FailedToEncrypt(bip138::Error),
     FailedToDecrypt(bip138::Error),
+    FailedToInspect(bip138::Error),
+    JsonError(serde_json::Error),
     #[cfg(feature = "devices")]
     FailedToFetchXpub(bip138::signing_devices::FetchFailed),
     #[cfg(feature = "devices")]
@@ -62,6 +64,8 @@ impl std::fmt::Display for CliError {
             CliError::ReadError(err) => write!(f, "Cannot read file: {err:?}"),
             CliError::FailedToEncrypt(err) => write!(f, "Cannot encrypt: {err:?}"),
             CliError::FailedToDecrypt(err) => write!(f, "Cannot decrypt: {err:?}"),
+            CliError::FailedToInspect(err) => write!(f, "Cannot inspect: {err:?}"),
+            CliError::JsonError(err) => write!(f, "Cannot format JSON: {err:?}"),
             #[cfg(feature = "devices")]
             CliError::FailedToFetchXpub(err) => write!(f, "Cannot fetch xpub: {err}"),
             #[cfg(feature = "devices")]
@@ -115,6 +119,13 @@ enum Commands {
         #[cfg(feature = "devices")]
         #[arg(long)]
         prompt: bool,
+    },
+
+    /// Inspect an encrypted descriptor without decrypting it
+    Inspect {
+        /// Input file to inspect
+        #[arg(short, long)]
+        file: Option<String>,
     },
 }
 
@@ -422,6 +433,44 @@ async fn main() -> Result<(), CliError> {
             fs::write(&output_path, &document).map_err(CliError::WriteError)?;
             println!("descriptor written to {output_path:?}");
         }
+        Commands::Inspect { file } => {
+            let input_path = match file {
+                Some(path) => {
+                    let mut descriptor_path = PathBuf::new();
+                    descriptor_path.push(path);
+                    descriptor_path
+                }
+                None => {
+                    let mut descriptor_path = env::current_dir().map_err(CliError::CwdError)?;
+                    descriptor_path.push("descriptor.bin");
+                    descriptor_path
+                }
+            };
+
+            let data = fs::read(&input_path).map_err(CliError::ReadError)?;
+            let metadata = EncryptedMetadata::from_encrypted_payload(&data)
+                .map_err(CliError::FailedToInspect)?;
+            let derivation_paths: Vec<String> = metadata
+                .derivation_paths
+                .iter()
+                .map(|path| path.to_string())
+                .collect();
+            let individual_secrets: Vec<String> = metadata
+                .individual_secrets
+                .iter()
+                .map(|secret| hex_encode(secret))
+                .collect();
+            let json = serde_json::json!({
+                "version": format!("{:?}", metadata.version),
+                "encryption": format!("{:?}", metadata.encryption),
+                "derivation_paths": derivation_paths,
+                "individual_secrets": individual_secrets,
+                "nonce": hex_encode(&metadata.nonce),
+                "ciphertext_bytes": metadata.ciphertext_lens,
+            });
+            let json = serde_json::to_string_pretty(&json).map_err(CliError::JsonError)?;
+            println!("{json}");
+        }
     }
     Ok(())
 }
@@ -531,4 +580,13 @@ fn print_xpub_warning(warning: bip138::signing_devices::XpubWarning) {
             eprintln!("warning: timed out fetching xpub from {device} at {path}");
         }
     }
+}
+
+fn hex_encode(bytes: &[u8]) -> String {
+    let mut out = String::with_capacity(bytes.len() * 2);
+    for byte in bytes {
+        use std::fmt::Write as _;
+        write!(&mut out, "{byte:02x}").expect("writing to string must not fail");
+    }
+    out
 }
