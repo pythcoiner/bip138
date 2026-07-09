@@ -28,7 +28,7 @@ mscript_12_3_5 = { version = "12.3.5", default-features = false, features = ["se
 mscript_12_0 = { version = "12.0", default-features = false, features = ["serde", "no-std"], package = "miniscript" , optional = true}
 
 # devices
-async-hwi = {version = "0.0.29", optional = true}
+async-hwi = { git = "https://github.com/wizardsardine/async-hwi", rev = "b7d924a0df5eeec7cdf0e03d7eb77bf48226fcb5", optional = true }
 
 # descriptor_backup (std-only document parsing)
 serde = { version = "1.0.228", features = ["derive"], optional = true }
@@ -61,4 +61,3 @@ tokio = ["dep:tokio"]
 devices = ["dep:async-hwi", "tokio"]
 descriptor_backup = ["dep:serde", "dep:serde_json"]
 cli = ["dep:clap", "tokio", "miniscript_latest", "rand", "descriptor_backup"]
-

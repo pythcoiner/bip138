@@ -7,6 +7,8 @@ use crate::miniscript::bitcoin::{
     hashes::{Hash, HashEngine, sha256},
     secp256k1::{self, constants::SCHNORR_PUBLIC_KEY_SIZE},
 };
+#[cfg(feature = "devices")]
+use async_hwi::DeviceKind;
 use chacha20poly1305::{
     ChaCha20Poly1305, Key, Nonce,
     aead::{Aead, KeyInit},
@@ -14,6 +16,8 @@ use chacha20poly1305::{
 #[cfg(feature = "rand")]
 use rand::{TryRngCore, rngs::OsRng};
 
+#[cfg(feature = "devices")]
+use crate::signing_devices::Expect;
 use crate::{Encryption, Version, descriptor::bip341_nums};
 
 const DECRYPTION_SECRET: &str = "BIP138_DECRYPTION_SECRET";
@@ -23,6 +27,7 @@ pub const MAGIC: &str = "BIP138";
 pub const PADDING_MIN_SIZE: usize = 10 * 1024;
 const PADDING_GROWTH_NUMERATOR: usize = 5;
 const PADDING_GROWTH_DENOMINATOR: usize = 4;
+const COMMON_ACCOUNT_MAX: u32 = 9;
 
 /// Size in bytes of a 32-byte x-only Schnorr/BIP340 public key.
 pub const XONLY_KEY_SIZE: usize = SCHNORR_PUBLIC_KEY_SIZE;
@@ -253,6 +258,82 @@ pub fn individual_secrets(secret: &sha256::Hash, keys: &[[u8; XONLY_KEY_SIZE]]) 
     keys.iter()
         .map(|k| individual_secret(secret, k))
         .collect::<Vec<_>>()
+}
+
+#[cfg(feature = "devices")]
+pub fn common_derivation_paths(
+    kind: DeviceKind,
+    network: bitcoin::Network,
+) -> Vec<(DerivationPath, Expect)> {
+    common_derivation_paths_unclassified(network)
+        .into_iter()
+        .map(|path| {
+            let expect = common_derivation_path_expect(kind, &path);
+            (path, expect)
+        })
+        .collect()
+}
+
+#[cfg(not(feature = "devices"))]
+pub fn common_derivation_paths(network: bitcoin::Network) -> Vec<DerivationPath> {
+    common_derivation_paths_unclassified(network)
+}
+
+fn common_derivation_paths_unclassified(network: bitcoin::Network) -> Vec<DerivationPath> {
+    let coin_type = coin_type(network);
+    let mut paths = Vec::new();
+    for account in 0..=COMMON_ACCOUNT_MAX {
+        for script_type in [1, 2] {
+            paths.push(DerivationPath::from(vec![
+                ChildNumber::from_hardened_idx(48).expect("purpose below hardened max"),
+                ChildNumber::from_hardened_idx(coin_type).expect("coin type below hardened max"),
+                ChildNumber::from_hardened_idx(account).expect("account below hardened max"),
+                ChildNumber::from_hardened_idx(script_type)
+                    .expect("script type below hardened max"),
+            ]));
+        }
+    }
+    for purpose in [44, 49, 84, 86, 87] {
+        for account in 0..=COMMON_ACCOUNT_MAX {
+            paths.push(DerivationPath::from(vec![
+                ChildNumber::from_hardened_idx(purpose).expect("purpose below hardened max"),
+                ChildNumber::from_hardened_idx(coin_type).expect("coin type below hardened max"),
+                ChildNumber::from_hardened_idx(account).expect("account below hardened max"),
+            ]));
+        }
+    }
+    paths
+}
+
+#[cfg(feature = "devices")]
+pub(crate) fn common_derivation_path_expect(kind: DeviceKind, path: &DerivationPath) -> Expect {
+    match (kind, path_purpose(path)) {
+        (DeviceKind::BitBox02, Some(44 | 87)) => Expect::CanFail,
+        (_, Some(87)) => Expect::CanFail,
+        _ => Expect::MustFetch,
+    }
+}
+
+fn fallback_derivation_path_set() -> BTreeSet<DerivationPath> {
+    let mut paths = BTreeSet::new();
+    for network in [bitcoin::Network::Bitcoin, bitcoin::Network::Testnet] {
+        paths.extend(common_derivation_paths_unclassified(network));
+    }
+    paths
+}
+
+#[cfg(feature = "devices")]
+fn path_purpose(path: &DerivationPath) -> Option<u32> {
+    const HARDENED_BIT: u32 = 1 << 31;
+
+    path.to_u32_vec().first().map(|index| index & !HARDENED_BIT)
+}
+
+fn coin_type(network: bitcoin::Network) -> u32 {
+    match network {
+        bitcoin::Network::Bitcoin => 0,
+        _ => 1,
+    }
 }
 
 pub fn inner_encrypt(
@@ -644,8 +725,10 @@ where
         .collect::<BTreeSet<_>>();
 
     // drop duplicates derivation paths
+    let fallback_derivation_paths = fallback_derivation_path_set();
     let derivation_paths = derivation_paths
         .into_iter()
+        .filter(|path| !fallback_derivation_paths.contains(path))
         .collect::<BTreeSet<_>>()
         .into_iter()
         .collect::<Vec<_>>();
@@ -1238,6 +1321,69 @@ mod tests {
     }
 
     #[test]
+    fn test_common_derivation_paths() {
+        #[cfg(feature = "devices")]
+        let paths = common_derivation_paths(DeviceKind::Ledger, bitcoin::Network::Bitcoin)
+            .into_iter()
+            .map(|(path, _)| path)
+            .collect::<Vec<_>>();
+        #[cfg(not(feature = "devices"))]
+        let paths = common_derivation_paths(bitcoin::Network::Bitcoin);
+        assert_eq!(paths.len(), 70);
+        assert!(paths.contains(&DerivationPath::from_str("44h/0h/0h").unwrap()));
+        assert!(paths.contains(&DerivationPath::from_str("49h/0h/0h").unwrap()));
+        assert!(paths.contains(&DerivationPath::from_str("84h/0h/9h").unwrap()));
+        assert!(paths.contains(&DerivationPath::from_str("86h/0h/9h").unwrap()));
+        assert!(paths.contains(&DerivationPath::from_str("87h/0h/9h").unwrap()));
+        assert!(paths.contains(&DerivationPath::from_str("48h/0h/9h/1h").unwrap()));
+        assert!(paths.contains(&DerivationPath::from_str("48h/0h/9h/2h").unwrap()));
+        assert!(!paths.contains(&DerivationPath::from_str("49h/1h/0h").unwrap()));
+        assert!(!paths.contains(&DerivationPath::from_str("49h/0h/10h").unwrap()));
+
+        #[cfg(feature = "devices")]
+        let paths = common_derivation_paths(DeviceKind::Ledger, bitcoin::Network::Testnet)
+            .into_iter()
+            .map(|(path, _)| path)
+            .collect::<Vec<_>>();
+        #[cfg(not(feature = "devices"))]
+        let paths = common_derivation_paths(bitcoin::Network::Testnet);
+        assert_eq!(paths.len(), 70);
+        assert!(paths.contains(&DerivationPath::from_str("44h/1h/0h").unwrap()));
+        assert!(paths.contains(&DerivationPath::from_str("86h/1h/9h").unwrap()));
+        assert!(paths.contains(&DerivationPath::from_str("87h/1h/9h").unwrap()));
+        assert!(paths.contains(&DerivationPath::from_str("48h/1h/9h/2h").unwrap()));
+        assert!(!paths.contains(&DerivationPath::from_str("49h/0h/0h").unwrap()));
+    }
+
+    #[cfg(feature = "devices")]
+    #[test]
+    fn test_common_derivation_path_expect_by_device() {
+        let ledger = common_derivation_paths(DeviceKind::Ledger, bitcoin::Network::Bitcoin);
+        assert!(ledger.contains(&(
+            DerivationPath::from_str("44h/0h/0h").unwrap(),
+            Expect::MustFetch
+        )));
+        assert!(ledger.contains(&(
+            DerivationPath::from_str("87h/0h/0h").unwrap(),
+            Expect::CanFail
+        )));
+
+        let bitbox = common_derivation_paths(DeviceKind::BitBox02, bitcoin::Network::Bitcoin);
+        assert!(bitbox.contains(&(
+            DerivationPath::from_str("44h/0h/0h").unwrap(),
+            Expect::CanFail
+        )));
+        assert!(bitbox.contains(&(
+            DerivationPath::from_str("87h/0h/0h").unwrap(),
+            Expect::CanFail
+        )));
+        assert!(bitbox.contains(&(
+            DerivationPath::from_str("84h/0h/0h").unwrap(),
+            Expect::MustFetch
+        )));
+    }
+
+    #[test]
     fn test_encode_decode_plaintext_ignores_padding() {
         let content_metadata: Vec<u8> = Content::Bip380.try_into().unwrap();
 
@@ -1579,6 +1725,33 @@ mod tests {
         let decrypted_3 =
             decrypt_chacha20_poly1305_v1(pk3(), &individual_secrets, cyphertext.clone(), nonce);
         assert!(decrypted_3.is_err());
+    }
+
+    #[test]
+    fn test_encrypt_excludes_fallback_derivation_paths() {
+        let keys = vec![pk1()];
+        let data = "test".as_bytes().to_vec();
+        let fallback_bitcoin = DerivationPath::from_str("84h/0h/0h").unwrap();
+        let fallback_testnet = DerivationPath::from_str("87h/1h/9h").unwrap();
+        let custom = DerivationPath::from_str("8/9").unwrap();
+
+        let bytes = encrypt_chacha20_poly1305_v1(
+            vec![
+                fallback_bitcoin.clone(),
+                fallback_testnet.clone(),
+                custom.clone(),
+            ],
+            Content::Bip380,
+            keys,
+            &data,
+            Padding::None,
+        )
+        .unwrap();
+
+        let deriv_paths = decode_derivation_paths(&bytes).unwrap();
+        assert_eq!(deriv_paths, vec![custom]);
+        assert!(!deriv_paths.contains(&fallback_bitcoin));
+        assert!(!deriv_paths.contains(&fallback_testnet));
     }
 
     #[test]
@@ -2165,6 +2338,14 @@ mod encrypted_backup {
             .collect()
     }
 
+    fn envelope_derivation_paths(mut derivation_paths: Vec<DerivationPath>) -> Vec<DerivationPath> {
+        let fallback_derivation_paths = fallback_derivation_path_set();
+        derivation_paths.retain(|path| !fallback_derivation_paths.contains(path));
+        derivation_paths.sort();
+        derivation_paths.dedup();
+        derivation_paths
+    }
+
     #[test]
     #[ignore]
     fn regenerate_vectors() {
@@ -2237,11 +2418,12 @@ mod encrypted_backup {
                 .map(|s| secp256k1::PublicKey::from_str(s).expect(description))
                 .collect();
 
-            let mut derivation_paths: Vec<DerivationPath> = v
+            let derivation_paths: Vec<DerivationPath> = v
                 .derivation_paths
                 .iter()
                 .map(|s| DerivationPath::from_str(s).expect(description))
                 .collect();
+            let expected_derivation_paths = envelope_derivation_paths(derivation_paths.clone());
 
             let nonce_bytes = hex::decode(&v.nonce).expect(description);
             let nonce: [u8; 12] = nonce_bytes.try_into().expect("nonce must be 12 bytes");
@@ -2309,9 +2491,8 @@ mod encrypted_backup {
                 decode_derivation_paths(&encrypted).expect(description);
 
             parsed_derivation_paths.sort();
-            derivation_paths.sort();
             assert_eq!(
-                parsed_derivation_paths, derivation_paths,
+                parsed_derivation_paths, expected_derivation_paths,
                 "Derivation paths mismatch: {description}"
             );
 
@@ -2360,7 +2541,7 @@ mod encrypted_backup {
             let mut parsed_paths_t = decode_derivation_paths(&with_trailer).expect(description);
             parsed_paths_t.sort();
             assert_eq!(
-                parsed_paths_t, derivation_paths,
+                parsed_paths_t, expected_derivation_paths,
                 "Derivation paths mismatch with trailing bytes: {description}"
             );
 
