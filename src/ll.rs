@@ -497,6 +497,9 @@ pub fn encode_derivation_paths(derivation_paths: Vec<DerivationPath>) -> Result<
     for path in derivation_paths {
         let childs = path.to_u32_vec();
         let len = childs.len();
+        if len == 0 {
+            return Err(Error::DerivPathEmpty);
+        }
         if len > u8::MAX as usize {
             return Err(Error::DerivPathLength);
         }
@@ -1649,6 +1652,14 @@ mod tests {
         assert_eq!(bytes, vec![0x00]);
         let (_, paths) = parse_derivation_paths(&bytes).unwrap();
         assert_eq!(paths, vec![]);
+    }
+
+    #[test]
+    fn test_encode_zero_child_deriv_path() {
+        // A path with no children would encode CHILD_COUNT = 0, which the decoder
+        // rejects; refuse it on encode instead of emitting an unparseable byte.
+        let res = encode_derivation_paths(vec![DerivationPath::master()]);
+        assert_eq!(res, Err(Error::DerivPathEmpty));
     }
 
     #[test]
