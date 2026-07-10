@@ -90,7 +90,7 @@ pub enum Content {
 //
 // | Value  | Definition                             |
 // |:-------|:---------------------------------------|
-// | 0x00   | Reserved                               |
+// | 0x00   | End of content items; padding follows  |
 // | 0x01   | BIP Number (big-endian uint16)         |
 // | 0x02   | Vendor-Specific Opaque Tag             |
 // | 0x03   | String                                 |
@@ -102,16 +102,16 @@ pub enum Content {
 // `DATA`: variable-length field whose encoding depends on `TYPE`.
 //
 // For `TYPE` values defined above:
-// - 0x00: parsers MUST reject the payload.
+// - 0x00: parsers MUST stop reading content items; the remaining bytes are padding.
 // - 0x01: `LENGTH` MUST be omitted and `DATA` is a 2-byte big-endian unsigned integer representing the BIP number that defines it.
 // - 0x02: `DATA` MUST be `LENGTH` bytes of opaque, vendor-specific data.
 // - 0x03: `DATA` MUST be empty, and the following `PLAINTEXT` is the string itself, which MUST be UTF-8.
 //
 // For all `TYPE` values except `0x01`, parsers MUST reject `CONTENT` if `LENGTH` exceeds the remaining payload bytes.
 //
-// Parsers MUST skip unknown `TYPE` values less than `0x80`, by consuming `LENGTH` bytes of `DATA`.
+// For an unknown `TYPE` less than `0x80`, parsers MUST consume its `LENGTH` bytes of `DATA`, then consume the following payload `LENGTH` and `PLAINTEXT`, and continue with the next item.
 //
-// For unknown `TYPE` values greater than or equal to `0x80`, it MUST stop parsing `CONTENT`.
+// For an unknown `TYPE` greater than or equal to `0x80`, parsers MUST reject the payload.
 const CONTENT_RESERVED: u8 = 0x00;
 const CONTENT_BIP: u8 = 0x01;
 const CONTENT_PROPRIETARY: u8 = 0x02;
