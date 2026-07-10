@@ -1075,6 +1075,9 @@ pub fn parse_encrypted_payload(
     let (VarInt(data_len), incr) = parse_varint(&bytes[offset..]).ok_or(Error::VarInt)?;
     // FIXME: in 32bit systems usize is 32 bits
     let data_len = data_len as usize;
+    if data_len == 0 {
+        return Err(Error::CypherTextEmpty);
+    }
     offset = increment_offset(bytes, offset, incr)?;
     // <CYPHERTEXT>
     check_offset_lookahead(offset, bytes, data_len)?;
@@ -1584,6 +1587,14 @@ mod tests {
     fn test_encode_empty_encrypted_payload() {
         let res = encode_encrypted_payload([3; 12], &[]);
         assert_eq!(res, Err(Error::CypherTextEmpty));
+    }
+
+    #[test]
+    fn test_parse_zero_length_ciphertext() {
+        // A valid nonce followed by a zero LENGTH must be rejected at framing.
+        let mut bytes = [3u8; 12].to_vec();
+        bytes.push(0x00);
+        assert_eq!(parse_encrypted_payload(&bytes), Err(Error::CypherTextEmpty));
     }
 
     #[test]
