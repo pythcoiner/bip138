@@ -2,10 +2,11 @@
 //! `descriptor_backup` feature. A wallet policy is a descriptor template with
 //! `@i` placeholders plus a key information vector of `[origin]xpub` entries.
 //!
-//! miniscript 12.3.5 has no BIP388 parser, so the template stays an opaque
-//! string and is never compiled. The key vector is typed, which validates each
-//! entry. The xpub roots are safe encryption keys here: the template's `/**`
-//! guarantees the root never goes on-chain.
+//! miniscript 12.3.5 has no BIP388 parser, so the template is stored as a
+//! string. The key vector is typed, which validates each entry. `validate()`
+//! rebuilds the concrete descriptor from template and keys, which rejects any
+//! placeholder without a trailing derivation or wildcard. That guarantees an
+//! xpub root never goes on-chain unchanged and is safe to seed encryption.
 
 use alloc::{boxed::Box, collections::BTreeSet, string::String, vec::Vec};
 use core::str::FromStr;
@@ -134,6 +135,11 @@ impl PolicyBackup {
             {
                 return Err(Error::DescriptorBackup);
             }
+            // Rebuild the concrete descriptor so every placeholder is checked to
+            // apply a trailing derivation or wildcard. Without one, the xpub root
+            // seeding encryption would also be the on-chain key, letting anyone
+            // recompute the secret from a single spend.
+            set.to_descriptor().map_err(|_| Error::DescriptorBackup)?;
         }
         Ok(())
     }
@@ -183,6 +189,9 @@ impl ToPayload for PolicyBackup {
     }
 
     fn keys(&self) -> Result<Vec<secp256k1::PublicKey>, Error> {
+        // Never seed encryption from an unvalidated policy: a placeholder with no
+        // trailing derivation/wildcard would put the seeding root on-chain.
+        self.validate()?;
         let mut keys = BTreeSet::new();
         for key in self.all_keys() {
             keys.insert(key_root(key)?);
@@ -321,6 +330,24 @@ mod tests {
     #[test]
     fn single_literal_key_errors() {
         let doc = "{\"keys\":[\"0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798\"],\"policy\":\"pkh(@0/**)\"}";
+        let err = parse_policy_backup(doc.as_bytes()).unwrap_err();
+        assert_eq!(err, Error::DescriptorBackup);
+    }
+
+    #[test]
+    fn bare_placeholder_policy_errors() {
+        // A placeholder with no suffix puts the xpub root on-chain unchanged,
+        // so the root cannot safely seed encryption. Must be refused.
+        let doc = "{\"keys\":[\"".to_string() + KEY_PKH + "\"],\"policy\":\"pkh(@0)\"}";
+        let err = parse_policy_backup(doc.as_bytes()).unwrap_err();
+        assert_eq!(err, Error::DescriptorBackup);
+    }
+
+    #[test]
+    fn no_wildcard_placeholder_policy_errors() {
+        // A fixed derivation with no wildcard is rejected by the BIP388 template
+        // parser, so such a document never reaches the encryption-key set.
+        let doc = "{\"keys\":[\"".to_string() + KEY_PKH + "\"],\"policy\":\"pkh(@0/0)\"}";
         let err = parse_policy_backup(doc.as_bytes()).unwrap_err();
         assert_eq!(err, Error::DescriptorBackup);
     }
