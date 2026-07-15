@@ -826,7 +826,7 @@ fn encrypt_to_level_keys(
         return Err(CliError::NoKeys);
     }
     EncryptedBackup::new()
-        .set_payloads(&payloads)
+        .set_payloads(payloads)
         .map_err(CliError::FailedToEncrypt)?
         .set_derivation_paths(paths)
         .set_keys(keys)
