@@ -45,7 +45,7 @@
     "content": "0300"
   },
   {
-    "description": "TYPE 0x00 is reserved",
+    "description": "TYPE 0x00 ends the content items",
     "valid": false,
     "content": "00"
   },
