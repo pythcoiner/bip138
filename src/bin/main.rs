@@ -14,10 +14,14 @@ use miniscript::{Descriptor, DescriptorPublicKey, descriptor::DescriptorKeyParse
 use std::{
     collections::BTreeSet,
     env,
+    ffi::OsString,
     fs::{self, File},
-    io::Write,
+    io::{self, BufRead, IsTerminal, Write},
     path::{Path, PathBuf},
     str::FromStr,
+    sync::mpsc,
+    thread,
+    time::Duration,
 };
 
 #[cfg(feature = "devices")]
@@ -40,6 +44,7 @@ pub enum CliError {
     OpenError(std::io::Error),
     WriteError(std::io::Error),
     ReadError(std::io::Error),
+    StdinError(std::io::Error),
     FailedToEncrypt(bip138::Error),
     FailedToDecrypt(bip138::Error),
     FailedToInspect(bip138::Error),
@@ -69,6 +74,7 @@ impl std::fmt::Display for CliError {
             CliError::OpenError(err) => write!(f, "Cannot open file: {err:?}"),
             CliError::WriteError(err) => write!(f, "Cannot write file: {err:?}"),
             CliError::ReadError(err) => write!(f, "Cannot read file: {err:?}"),
+            CliError::StdinError(err) => write!(f, "Cannot read stdin: {err:?}"),
             CliError::FailedToEncrypt(err) => write!(f, "Cannot encrypt: {err:?}"),
             CliError::FailedToDecrypt(err) => write!(f, "Cannot decrypt: {err:?}"),
             CliError::FailedToInspect(err) => write!(f, "Cannot inspect: {err:?}"),
@@ -185,9 +191,56 @@ enum Commands {
     },
 }
 
+/// Piped arguments are expected to be there already (`cat args | beb ...`), so
+/// give up quickly rather than block on a pipe that never delivers.
+const STDIN_TIMEOUT: Duration = Duration::from_millis(200);
+
+/// Arguments piped on stdin extend the command line, so one command's output can
+/// feed the next. Skipped when stdin is a terminal, to leave an interactive
+/// session alone.
+fn parse_cli() -> Result<Cli, CliError> {
+    let mut args = env::args_os().collect::<Vec<OsString>>();
+    // a terminal stdin is left alone, so an interactive run never waits
+    if !io::stdin().is_terminal() {
+        args.extend(read_args_within(STDIN_TIMEOUT, || {
+            read_stdin_args(io::stdin().lock())
+        })?);
+    }
+    Ok(Cli::parse_from(args))
+}
+
+/// Run `read` on a detached thread and give up after `timeout`. A thread left
+/// parked on a pipe that never delivers dies with the process.
+fn read_args_within<F>(timeout: Duration, read: F) -> Result<Vec<OsString>, CliError>
+where
+    F: FnOnce() -> Result<Vec<OsString>, CliError> + Send + 'static,
+{
+    let (tx, rx) = mpsc::channel();
+    thread::spawn(move || {
+        let _ = tx.send(read());
+    });
+    match rx.recv_timeout(timeout) {
+        Ok(args) => args,
+        // nothing piped in time: carry on with the command line as given
+        Err(_) => Ok(Vec::new()),
+    }
+}
+
+/// Whitespace-separated arguments read a line at a time, so the whole stream is
+/// never held in memory. Splitting on whitespace drops the trailing newline a
+/// piped `echo` adds.
+fn read_stdin_args(reader: impl BufRead) -> Result<Vec<OsString>, CliError> {
+    let mut args = Vec::new();
+    for line in reader.lines() {
+        let line = line.map_err(CliError::StdinError)?;
+        args.extend(line.split_whitespace().map(OsString::from));
+    }
+    Ok(args)
+}
+
 #[tokio::main]
 async fn main() -> Result<(), CliError> {
-    let cli = Cli::parse();
+    let cli = parse_cli()?;
 
     // Handle the specific subcommand
     match &cli.command {
@@ -902,6 +955,79 @@ mod tests {
     const KEY: &str = "[6738736c/84'/0'/2']xpub6CRQzb8u9dmMcq5XAwwRn9gcoYCjndJkhKgD11WKzbVGd932UmrExWFxCAvRnDN3ez6ZujLmMvmLBaSWdfWVn75L83Qxu1qSX4fJNrJg2Gt/<0;1>/*";
     const OTHER_KEY: &str = "[b2b1f0cf/48'/0'/0'/2']xpub6EWhjpPa6FqrcaPBuGBZRJVjzGJ1ZsMygRF26RwN932Vfkn1gyCiTbECVitBjRCkexEvetLdiqzTcYimmzYxyR1BZ79KNevgt61PDcukmC7/<0;1>/*";
     const BARE_TPUB: &str = "tpubDC5FSnBiZDMmkoat4aZFfbJdEthnPqJ1jXZcKWJNKC4yJanLA55dRW5qKJRRvAo1SwaXeUx2ayUQyVJ6eCbABbBB8Wn3T7dAuVJRnZgntVC";
+
+    fn args(input: &str) -> Vec<OsString> {
+        read_stdin_args(io::Cursor::new(input)).unwrap()
+    }
+
+    #[test]
+    fn stdin_args_reads_nothing_from_empty_input() {
+        assert_eq!(args(""), Vec::<OsString>::new());
+    }
+
+    #[test]
+    fn stdin_args_reads_nothing_from_blank_input() {
+        // a bare newline, as `echo | beb` produces, must add no argument
+        assert_eq!(args(" \n\t "), Vec::<OsString>::new());
+    }
+
+    #[test]
+    fn stdin_args_splits_on_whitespace_and_drops_trailing_newline() {
+        assert_eq!(args("--msg note\n"), ["--msg", "note"]);
+    }
+
+    #[test]
+    fn stdin_args_accumulate_across_lines() {
+        // each line is read on its own, so arguments split over several lines
+        // must still all land
+        assert_eq!(
+            args("--msg note\n--keys keys.txt\n"),
+            ["--msg", "note", "--keys", "keys.txt"]
+        );
+    }
+
+    #[test]
+    fn stdin_args_rejects_invalid_utf8() {
+        let failed = read_stdin_args(io::Cursor::new([0xff, 0xfe])).unwrap_err();
+        assert!(matches!(failed, CliError::StdinError(_)));
+    }
+
+    #[test]
+    fn args_of_a_prompt_reader_are_kept() {
+        let read = read_args_within(Duration::from_secs(30), || {
+            Ok(vec![OsString::from("--msg"), OsString::from("note")])
+        })
+        .unwrap();
+
+        assert_eq!(read, ["--msg", "note"]);
+    }
+
+    #[test]
+    fn args_of_a_reader_slower_than_the_timeout_are_dropped() {
+        // a pipe that never delivers must not wedge the cli
+        let read = read_args_within(Duration::from_millis(50), || {
+            thread::sleep(Duration::from_secs(30));
+            Ok(vec![OsString::from("--msg")])
+        })
+        .unwrap();
+
+        assert_eq!(read, Vec::<OsString>::new());
+    }
+
+    #[test]
+    fn piped_args_reach_the_parser() {
+        let cli = Cli::parse_from(
+            ["beb", "encrypt"]
+                .map(OsString::from)
+                .into_iter()
+                .chain(args("--msg note")),
+        );
+
+        match cli.command {
+            Commands::Encrypt { msg, .. } => assert_eq!(msg, Some("note".to_string())),
+            other => panic!("expected encrypt, got {other:?}"),
+        }
+    }
 
     #[test]
     fn decrypted_to_document_joins_payloads_with_newline() {
