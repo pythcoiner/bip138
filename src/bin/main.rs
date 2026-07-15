@@ -237,6 +237,23 @@ async fn main() -> Result<(), CliError> {
             let descriptor = Descriptor::<DescriptorPublicKey>::from_str(data.trim())
                 .map_err(CliError::CantConvertToDescriptor)?;
 
+            // Warn straight from the descriptor: excluding every key expression makes the
+            // backup refuse to build, and the user still has to be told what was dropped.
+            for w in bip138::descriptor::descr_warnings(&descriptor)
+                .map_err(CliError::FailedToEncrypt)?
+            {
+                match w {
+                    bip138::Warning::DisallowedKeyExpression(k) => {
+                        eprintln!(
+                            "warning: disallowed key expression excluded from encryption-key set: {k}; the cosigner holding this key cannot decrypt the backup with their key"
+                        );
+                    }
+                    bip138::Warning::NumsKey(k) => {
+                        eprintln!("warning: BIP341 NUMS key excluded from encryption-key set: {k}");
+                    }
+                }
+            }
+
             if !wrap_levels.is_empty() {
                 #[cfg(feature = "devices")]
                 if device.is_some() {
@@ -290,20 +307,6 @@ async fn main() -> Result<(), CliError> {
             }
 
             let encrypted = backup.encrypt().map_err(CliError::FailedToEncrypt)?;
-            let warnings = encrypted.warnings.clone();
-
-            for w in &warnings {
-                match w {
-                    bip138::Warning::DisallowedKeyExpression(k) => {
-                        eprintln!(
-                            "warning: disallowed key expression excluded from encryption-key set: {k}; the cosigner holding this key cannot decrypt the backup with their key"
-                        );
-                    }
-                    bip138::Warning::NumsKey(k) => {
-                        eprintln!("warning: BIP341 NUMS key excluded from encryption-key set: {k}");
-                    }
-                }
-            }
 
             // pass the byte vector to a file
             let mut output = File::create(&output_path).map_err(CliError::CreateError)?;
