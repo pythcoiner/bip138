@@ -250,10 +250,12 @@ pub fn nonce() -> [u8; 12] {
 }
 
 pub fn decryption_secret(keys: &[[u8; XONLY_KEY_SIZE]]) -> sha256::Hash {
-    // The secret is defined over the keys in increasing lexicographic order, so
-    // sort here rather than trust the caller to pass them sorted.
+    // The secret is defined over the distinct keys in increasing lexicographic
+    // order, so sort and deduplicate here rather than trust the caller. Two
+    // keys sharing an x coordinate normalize to a single entry.
     let mut keys = keys.to_vec();
     keys.sort();
+    keys.dedup();
     let bytes = keys.iter().fold(vec![], |mut a, b| {
         a.append(&mut b.to_vec());
         a
@@ -806,12 +808,14 @@ fn encode_v1_backup_with_padding<F>(
 where
     F: FnOnce(Vec<[u8; 32]>) -> Result<Vec<[u8; 32]>, Error>,
 {
-    // drop duplicates keys and sort out bip341 nums
-    let nums_xonly = bip341_nums().x_only_public_key().0;
-    let keys = keys
+    // drop duplicate keys at the x-only level and sort out bip341 nums; two
+    // keys sharing an x coordinate normalize to a single entry
+    let nums_xonly = bip341_nums().x_only_public_key().0.serialize();
+    let raw_keys = keys
         .into_iter()
-        .filter(|k| k.x_only_public_key().0 != nums_xonly)
-        .collect::<BTreeSet<_>>();
+        .map(|k| k.x_only_public_key().0.serialize())
+        .filter(|k| *k != nums_xonly)
+        .collect::<BTreeSet<[u8; XONLY_KEY_SIZE]>>();
 
     // drop duplicates derivation paths
     let fallback_derivation_paths = fallback_derivation_path_set();
@@ -822,17 +826,14 @@ where
         .into_iter()
         .collect::<Vec<_>>();
 
-    if keys.len() > u8::MAX as usize || keys.is_empty() {
+    if raw_keys.len() > u8::MAX as usize || raw_keys.is_empty() {
         return Err(Error::KeyCount);
     }
     if derivation_paths.len() > u8::MAX as usize {
         return Err(Error::DerivPathCount);
     }
 
-    let raw_keys = keys
-        .into_iter()
-        .map(|k| k.x_only_public_key().0.serialize())
-        .collect::<Vec<[u8; XONLY_KEY_SIZE]>>();
+    let raw_keys = raw_keys.into_iter().collect::<Vec<_>>();
 
     let secret = decryption_secret(&raw_keys);
     let individual_secrets = individual_secrets(&secret, raw_keys.as_slice());
@@ -1889,6 +1890,39 @@ mod tests {
         let res =
             encrypt_chacha20_poly1305_v1(deriv_paths, Content::Bip380, keys, &data, Padding::None);
         assert_eq!(res, Err(Error::DerivPathCount));
+    }
+
+    #[test]
+    fn test_keys_deduplicated_after_x_only_normalization() {
+        // Two keys sharing an x coordinate with opposite parity normalize to
+        // the same x-only key and must count once in the secret derivation.
+        let xonly = pk1().x_only_public_key().0.serialize();
+        assert_eq!(
+            decryption_secret(&[xonly]),
+            decryption_secret(&[xonly, xonly])
+        );
+
+        let secp = secp256k1::Secp256k1::new();
+        let negated = pk1().negate(&secp);
+        let payload = encode_plaintext(
+            &[(&Vec::try_from(Content::Bip380).unwrap(), b"test")],
+            Padding::None,
+        )
+        .unwrap();
+        let nonce = [7u8; 12];
+        let decoys = [[1u8; 32], [2u8; 32], [3u8; 32], [4u8; 32]];
+        let single =
+            encode_v1_backup_for_test_vectors(vec![], vec![pk1()], payload.clone(), nonce, &decoys)
+                .unwrap();
+        let both_parities = encode_v1_backup_for_test_vectors(
+            vec![],
+            vec![pk1(), negated],
+            payload,
+            nonce,
+            &decoys,
+        )
+        .unwrap();
+        assert_eq!(single, both_parities);
     }
 
     #[test]
