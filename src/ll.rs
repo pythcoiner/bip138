@@ -56,7 +56,7 @@ pub enum Error {
     EmptyBytes,
     Increment,
     ContentMetadataEmpty,
-    ContentReserved,
+    ContentEnd,
     EncryptionReserved,
     ZeroedNonce,
     Padding,
@@ -112,7 +112,7 @@ pub enum Content {
 // For an unknown `TYPE` less than `0x80`, parsers MUST consume its `LENGTH` bytes of `DATA`, treat the content type as unknown, consume the following payload `LENGTH` and `PLAINTEXT`, and continue with the next item.
 //
 // For an unknown `TYPE` greater than or equal to `0x80`, parsers MUST reject the payload.
-const CONTENT_RESERVED: u8 = 0x00;
+const CONTENT_END: u8 = 0x00;
 const CONTENT_BIP: u8 = 0x01;
 const CONTENT_PROPRIETARY: u8 = 0x02;
 const CONTENT_STRING: u8 = 0x03;
@@ -161,7 +161,7 @@ pub fn parse_content(bytes: &[u8]) -> Result<(usize, Content), Error> {
     let len = bytes.len();
     init_offset(bytes, 0)?;
     match bytes[0] {
-        CONTENT_RESERVED => Err(Error::ContentReserved),
+        CONTENT_END => Err(Error::ContentEnd),
         CONTENT_BIP => {
             check_offset_lookahead(0, bytes, 3).map_err(|_| Error::ContentMetadata)?;
             let bip_bytes: [u8; 2] = bytes[1..3].try_into().expect("2 bytes");
@@ -465,7 +465,7 @@ pub fn decode_plaintext(bytes: &[u8]) -> Result<Vec<(Content, Vec<u8>)>, Error> 
     let mut offset = 0usize;
     while offset < bytes.len() {
         // A 0x00 TYPE byte marks the end of the content sequence; the rest is padding.
-        if bytes[offset] == CONTENT_RESERVED {
+        if bytes[offset] == CONTENT_END {
             break;
         }
         // <CONTENT_METADATA>
@@ -1298,7 +1298,7 @@ mod tests {
         // empty bytes must fail
         assert!(parse_content(&[]).is_err());
         // TYPE 0x00 is reserved
-        assert_eq!(parse_content(&[0]), Err(Error::ContentReserved));
+        assert_eq!(parse_content(&[0]), Err(Error::ContentEnd));
         // BIP TYPE 0x01 requires 2 more bytes
         assert!(parse_content(&[1, 0]).is_err());
         // BIP380
