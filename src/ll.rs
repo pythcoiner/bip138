@@ -400,16 +400,15 @@ pub enum Padding {
 }
 
 fn doubling_bucket(len: usize) -> Result<usize, Error> {
-    let mut bucket = 5usize;
-    while bucket < len {
-        bucket = bucket
-            .checked_mul(2)
-            .ok_or(Error::IndividualSecretsLength)?;
-    }
-    if bucket > u8::MAX as usize {
+    if len > u8::MAX as usize {
         return Err(Error::IndividualSecretsLength);
     }
-    Ok(bucket)
+    let mut bucket = 5usize;
+    while bucket < len {
+        bucket *= 2;
+    }
+    // the bucket saturates at the one-byte COUNT limit of the format
+    Ok(bucket.min(u8::MAX as usize))
 }
 
 impl Padding {
@@ -1474,6 +1473,34 @@ mod tests {
         assert_eq!(doubling_bucket(6).unwrap(), 10);
         assert_eq!(doubling_bucket(11).unwrap(), 20);
         assert_eq!(doubling_bucket(21).unwrap(), 40);
+        assert_eq!(doubling_bucket(160).unwrap(), 160);
+        // past 160 the bucket saturates at the one-byte COUNT limit
+        assert_eq!(doubling_bucket(161).unwrap(), 255);
+        assert_eq!(doubling_bucket(255).unwrap(), 255);
+        assert_eq!(doubling_bucket(256), Err(Error::IndividualSecretsLength));
+    }
+
+    #[test]
+    fn test_encrypt_161_keys_saturates_decoy_bucket() {
+        // 161 keys overflow the 320 bucket: the count saturates at 255 and
+        // encoding must still succeed.
+        let mut keys = BTreeSet::new();
+        while keys.len() < 161 {
+            let key: [u8; 32] = random();
+            if let Ok(k) = XOnlyPublicKey::from_slice(&key) {
+                keys.insert(bitcoin::secp256k1::PublicKey::from_x_only_public_key(
+                    k,
+                    secp256k1::Parity::Even,
+                ));
+            }
+        }
+        let keys = keys.into_iter().collect::<Vec<_>>();
+        let data = "test".as_bytes().to_vec();
+        let bytes =
+            encrypt_chacha20_poly1305_v1(vec![], Content::Bip380, keys, &data, Padding::None)
+                .unwrap();
+        let (_, individual_secrets, _, _, _) = decode_v1(&bytes).unwrap();
+        assert_eq!(individual_secrets.len(), 255);
     }
 
     #[test]
