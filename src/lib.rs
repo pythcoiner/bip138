@@ -236,8 +236,27 @@ impl EncryptedMetadata {
     }
 }
 
+/// Vendor-specific content. This crate defines none, so a consumer that stores
+/// its own supplies both the parsed type and the parser for it.
+pub trait Proprietary: Sized {
+    /// `None` when the tag is not ours: the item is skipped like any other
+    /// content type without a parser, so the items around it stay recoverable.
+    fn parse(tag: &[u8], bytes: &[u8]) -> Option<Result<Self, Error>>;
+}
+
+/// Opts out of vendor content. Uninhabited, so `Decrypted::Proprietary` cannot
+/// be built when no parser is supplied.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum Decrypted {
+pub enum NoProprietary {}
+
+impl Proprietary for NoProprietary {
+    fn parse(_tag: &[u8], _bytes: &[u8]) -> Option<Result<Self, Error>> {
+        None
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Decrypted<P = NoProprietary> {
     Descriptor(Box<Descriptor<DescriptorPublicKey>>),
     #[cfg(feature = "descriptor_backup")]
     DescriptorBackup(Box<DescriptorBackup>),
@@ -249,6 +268,7 @@ pub enum Decrypted {
     String(String),
     Bip138(Vec<u8>),
     Raw(Vec<u8>),
+    Proprietary(P),
 }
 
 #[derive(Debug, Clone)]
@@ -497,47 +517,77 @@ impl EncryptedBackup {
         }
         Ok(self)
     }
-    pub fn extract(content: Content, bytes: Vec<u8>) -> Result<Decrypted, Error> {
+    /// Extract a decrypted content item. `None` means the content type has no
+    /// parser yet: `decrypt` skips the item and moves on to the next one, so
+    /// the items it does support stay recoverable.
+    pub fn extract<P: Proprietary>(
+        content: Content,
+        bytes: Vec<u8>,
+    ) -> Option<Result<Decrypted<P>, Error>> {
         match content {
-            Content::None | Content::Unknown => Ok(Decrypted::Raw(bytes)),
-            Content::String => {
-                let string = String::from_utf8(bytes).map_err(|_| Error::Utf8)?;
-                Ok(Decrypted::String(string))
-            }
-            Content::Bip138 => Ok(Decrypted::Bip138(bytes)),
-            Content::Bip380 => {
-                // Try a bare descriptor first; fall back to a JSON descriptor
-                // backup document if it is not a descriptor.
-                let descr_str = String::from_utf8(bytes).map_err(|_| Error::Utf8)?;
-                match Descriptor::<DescriptorPublicKey>::from_str(&descr_str) {
-                    Ok(descriptor) => Ok(Decrypted::Descriptor(Box::new(descriptor))),
-                    #[cfg(feature = "descriptor_backup")]
-                    Err(_) => {
-                        let backup =
-                            descriptor_backup::parse_descriptor_backup(descr_str.as_bytes())?;
-                        Ok(Decrypted::DescriptorBackup(Box::new(backup)))
-                    }
-                    #[cfg(not(feature = "descriptor_backup"))]
-                    Err(_) => Err(Error::Descriptor),
-                }
-            }
-            Content::Bip388 => {
-                #[cfg(feature = "descriptor_backup")]
-                {
-                    let backup = policy_backup::parse_policy_backup(&bytes)?;
-                    Ok(Decrypted::PolicyBackup(Box::new(backup)))
-                }
-                #[cfg(not(feature = "descriptor_backup"))]
-                {
-                    Err(Error::NotImplemented)
-                }
-            }
-            Content::BIP(_) | Content::Proprietary(_) | Content::Bip139 | Content::Bip329 => {
-                Err(Error::NotImplemented)
+            Content::None | Content::Unknown => Some(Ok(Decrypted::Raw(bytes))),
+            Content::String => Some(
+                String::from_utf8(bytes)
+                    .map(Decrypted::String)
+                    .map_err(|_| Error::Utf8),
+            ),
+            Content::Bip138 => Some(Ok(Decrypted::Bip138(bytes))),
+            Content::Bip380 => Some(Self::extract_bip380(bytes)),
+            Content::Bip388 => Self::extract_bip388(&bytes),
+            Content::Bip139 => Self::extract_bip139(&bytes),
+            Content::Bip329 => Self::extract_bip329(&bytes),
+            Content::BIP(bip) => Self::extract_bip(bip, &bytes),
+            Content::Proprietary(tag) => {
+                P::parse(&tag, &bytes).map(|parsed| parsed.map(Decrypted::Proprietary))
             }
         }
     }
+    fn extract_bip380<P>(bytes: Vec<u8>) -> Result<Decrypted<P>, Error> {
+        // Try a bare descriptor first; fall back to a JSON descriptor
+        // backup document if it is not a descriptor.
+        let descr_str = String::from_utf8(bytes).map_err(|_| Error::Utf8)?;
+        match Descriptor::<DescriptorPublicKey>::from_str(&descr_str) {
+            Ok(descriptor) => Ok(Decrypted::Descriptor(Box::new(descriptor))),
+            #[cfg(feature = "descriptor_backup")]
+            Err(_) => {
+                let backup = descriptor_backup::parse_descriptor_backup(descr_str.as_bytes())?;
+                Ok(Decrypted::DescriptorBackup(Box::new(backup)))
+            }
+            #[cfg(not(feature = "descriptor_backup"))]
+            Err(_) => Err(Error::Descriptor),
+        }
+    }
+    #[cfg(feature = "descriptor_backup")]
+    fn extract_bip388<P>(bytes: &[u8]) -> Option<Result<Decrypted<P>, Error>> {
+        Some(
+            policy_backup::parse_policy_backup(bytes)
+                .map(|backup| Decrypted::PolicyBackup(Box::new(backup))),
+        )
+    }
+    /// BIP388 parsing needs the descriptor_backup feature.
+    #[cfg(not(feature = "descriptor_backup"))]
+    fn extract_bip388<P>(_bytes: &[u8]) -> Option<Result<Decrypted<P>, Error>> {
+        None
+    }
+    /// BIP139 wallet backup metadata has no parser yet.
+    fn extract_bip139<P>(_bytes: &[u8]) -> Option<Result<Decrypted<P>, Error>> {
+        None
+    }
+    /// BIP329 labels have no parser yet.
+    fn extract_bip329<P>(_bytes: &[u8]) -> Option<Result<Decrypted<P>, Error>> {
+        None
+    }
+    /// Content defined by another BIP, none is supported yet.
+    fn extract_bip<P>(_bip: u16, _bytes: &[u8]) -> Option<Result<Decrypted<P>, Error>> {
+        None
+    }
+    /// Decrypt with no vendor parser: proprietary items are skipped. Use
+    /// [`Self::decrypt_with`] to parse them into your own type.
     pub fn decrypt(&self) -> Result<Vec<Decrypted>, Error> {
+        self.decrypt_with::<NoProprietary>()
+    }
+    /// Decrypt, parsing vendor-specific items with `P`'s [`Proprietary`] impl.
+    pub fn decrypt_with<P: Proprietary>(&self) -> Result<Vec<Decrypted<P>>, Error> {
         if self.keys.is_empty() {
             return Err(Error::NoKey);
         }
@@ -567,7 +617,7 @@ impl EncryptedBackup {
                         ) {
                             return items
                                 .into_iter()
-                                .map(|(content, bytes)| Self::extract(content, bytes))
+                                .filter_map(|(content, bytes)| Self::extract(content, bytes))
                                 .collect();
                         }
                     }
@@ -586,7 +636,7 @@ impl EncryptedBackup {
     /// features, so `Descriptor<DescriptorPublicKey>` is the same type
     /// across the boundary and no re-parsing is needed.
     #[cfg(feature = "v0")]
-    fn try_v0_decrypt(&self, raw: &[u8]) -> Result<Decrypted, Error> {
+    fn try_v0_decrypt<P>(&self, raw: &[u8]) -> Result<Decrypted<P>, Error> {
         use bitcoin_encrypted_backup_v0 as v0;
         let res = v0::EncryptedBackup::new()
             .set_encrypted_payload(raw)
@@ -743,6 +793,191 @@ mod string_tests {
             &secp,
             &secp256k1::SecretKey::from_slice(&sk).unwrap(),
         )
+    }
+}
+
+#[cfg(all(test, feature = "rand"))]
+mod skip_unimplemented_tests {
+    use super::*;
+
+    struct Labels(Vec<u8>);
+    impl ToPayload for Labels {
+        fn to_payload(&self) -> Result<Vec<u8>, Error> {
+            Ok(self.0.clone())
+        }
+        fn content_type(&self) -> Content {
+            Content::Bip329
+        }
+        fn derivation_paths(&self) -> Result<Vec<DerivationPath>, Error> {
+            Ok(vec![])
+        }
+        fn keys(&self) -> Result<Vec<secp256k1::PublicKey>, Error> {
+            Ok(vec![])
+        }
+    }
+
+    #[test]
+    fn bip329_item_before_descriptor_is_skipped() {
+        let labels = Labels(b"{\"type\":\"tx\"}".to_vec());
+        let descriptor = descriptor::tests::descr_1();
+        let payloads: [&dyn ToPayload; 2] = [&labels, &descriptor];
+        let backup = EncryptedBackup::new().set_payloads(&payloads).unwrap();
+        let keys = backup.get_keys();
+        let bytes = backup.encrypt().unwrap().bytes;
+
+        let restored = EncryptedBackup::new()
+            .set_encrypted_payload(&bytes)
+            .unwrap()
+            .set_keys(keys)
+            .decrypt()
+            .unwrap();
+        assert_eq!(restored, vec![Decrypted::Descriptor(Box::new(descriptor))]);
+    }
+
+    #[test]
+    fn proprietary_item_before_descriptor_is_skipped() {
+        // Proprietary content cannot go through set_payloads, encode at the ll level.
+        let descriptor = descriptor::tests::descr_1();
+        let keys = descriptor.keys().unwrap();
+        let descr_str = descriptor.to_string();
+        let items: [(Content, &[u8]); 2] = [
+            (Content::Proprietary(vec![0xAA]), b"vendor".as_slice()),
+            (Content::Bip380, descr_str.as_bytes()),
+        ];
+        let bytes =
+            ll::encrypt_chacha20_poly1305_v1_items(vec![], &items, keys.clone(), Padding::None)
+                .unwrap();
+
+        let restored = EncryptedBackup::new()
+            .set_encrypted_payload(&bytes)
+            .unwrap()
+            .set_keys(keys)
+            .decrypt()
+            .unwrap();
+        assert_eq!(restored, vec![Decrypted::Descriptor(Box::new(descriptor))]);
+    }
+
+    #[test]
+    fn only_unimplemented_items_decrypt_to_empty() {
+        let descriptor = descriptor::tests::descr_1();
+        let keys = descriptor.keys().unwrap();
+        let items: [(Content, &[u8]); 1] = [(Content::Bip329, b"{\"type\":\"tx\"}".as_slice())];
+        let bytes =
+            ll::encrypt_chacha20_poly1305_v1_items(vec![], &items, keys.clone(), Padding::None)
+                .unwrap();
+
+        let restored = EncryptedBackup::new()
+            .set_encrypted_payload(&bytes)
+            .unwrap()
+            .set_keys(keys)
+            .decrypt()
+            .unwrap();
+        assert_eq!(restored, vec![]);
+    }
+}
+
+#[cfg(all(test, feature = "rand"))]
+mod proprietary_tests {
+    use super::*;
+
+    const OURS: u8 = 0xAA;
+    const THEIRS: u8 = 0xBB;
+
+    /// A consumer type: the vendor stores a UTF-8 note under tag 0xAA.
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    struct Note(String);
+
+    impl Proprietary for Note {
+        fn parse(tag: &[u8], bytes: &[u8]) -> Option<Result<Self, Error>> {
+            if tag != [OURS] {
+                return None;
+            }
+            Some(
+                core::str::from_utf8(bytes)
+                    .map(|s| Note(s.to_string()))
+                    .map_err(|_| Error::Utf8),
+            )
+        }
+    }
+
+    /// Encode `items` at the ll level: proprietary content cannot go through
+    /// set_payloads.
+    fn encrypted(items: &[(Content, &[u8])]) -> (Vec<u8>, Vec<secp256k1::PublicKey>) {
+        let keys = descriptor::tests::descr_1().keys().unwrap();
+        let bytes =
+            ll::encrypt_chacha20_poly1305_v1_items(vec![], items, keys.clone(), Padding::None)
+                .unwrap();
+        (bytes, keys)
+    }
+
+    fn decrypt_with_note(bytes: &[u8], keys: Vec<secp256k1::PublicKey>) -> Vec<Decrypted<Note>> {
+        EncryptedBackup::new()
+            .set_encrypted_payload(bytes)
+            .unwrap()
+            .set_keys(keys)
+            .decrypt_with::<Note>()
+            .unwrap()
+    }
+
+    #[test]
+    fn known_tag_parses_into_consumer_type() {
+        let (bytes, keys) = encrypted(&[(Content::Proprietary(vec![OURS]), b"hello".as_slice())]);
+
+        let restored = decrypt_with_note(&bytes, keys);
+
+        assert_eq!(
+            restored,
+            vec![Decrypted::Proprietary(Note("hello".to_string()))]
+        );
+    }
+
+    #[test]
+    fn unknown_tag_is_skipped_and_later_items_still_decrypt() {
+        let descriptor = descriptor::tests::descr_1();
+        let descr_str = descriptor.to_string();
+        let (bytes, keys) = encrypted(&[
+            (Content::Proprietary(vec![THEIRS]), b"not ours".as_slice()),
+            (Content::Bip380, descr_str.as_bytes()),
+        ]);
+
+        let restored = decrypt_with_note(&bytes, keys);
+
+        assert_eq!(restored, vec![Decrypted::Descriptor(Box::new(descriptor))]);
+    }
+
+    #[test]
+    fn known_tag_with_invalid_data_errors() {
+        let (bytes, keys) =
+            encrypted(&[(Content::Proprietary(vec![OURS]), [0xff, 0xfe].as_slice())]);
+
+        let failed = EncryptedBackup::new()
+            .set_encrypted_payload(&bytes)
+            .unwrap()
+            .set_keys(keys)
+            .decrypt_with::<Note>()
+            .unwrap_err();
+
+        assert_eq!(failed, Error::Utf8);
+    }
+
+    #[test]
+    fn proprietary_before_descriptor_keeps_both_in_order() {
+        let descriptor = descriptor::tests::descr_1();
+        let descr_str = descriptor.to_string();
+        let (bytes, keys) = encrypted(&[
+            (Content::Proprietary(vec![OURS]), b"note".as_slice()),
+            (Content::Bip380, descr_str.as_bytes()),
+        ]);
+
+        let restored = decrypt_with_note(&bytes, keys);
+
+        assert_eq!(
+            restored,
+            vec![
+                Decrypted::Proprietary(Note("note".to_string())),
+                Decrypted::Descriptor(Box::new(descriptor)),
+            ]
+        );
     }
 }
 
