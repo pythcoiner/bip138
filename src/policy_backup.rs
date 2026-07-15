@@ -107,14 +107,10 @@ pub fn parse_policy_backup(bytes: &[u8]) -> Result<PolicyBackup, Error> {
     Ok(backup)
 }
 
-/// Root pubkey of a key info entry. Bare xpubs are valid here, so this reads
-/// `xkey.public_key` directly instead of reusing `dpk_to_pk`.
+/// Root pubkey of a key info entry. Bare xpubs are valid here, so this goes through
+/// `dpk_to_root_pk` rather than the encoding-side `dpk_to_pk`.
 fn key_root(key: &DescriptorPublicKey) -> Result<secp256k1::PublicKey, Error> {
-    match key {
-        DescriptorPublicKey::XPub(k) => Ok(k.xkey.public_key),
-        DescriptorPublicKey::MultiXPub(k) => Ok(k.xkey.public_key),
-        DescriptorPublicKey::Single(_) => Err(Error::DescriptorBackup),
-    }
+    crate::descriptor::dpk_to_root_pk(key).map_err(|_| Error::DescriptorBackup)
 }
 
 impl PolicyBackup {

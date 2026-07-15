@@ -24,6 +24,19 @@ fn xonly_of(key: &DescriptorPublicKey) -> [u8; 32] {
 
 use crate::{Error, Warning};
 
+/// Root public key of an xpub expression, ignoring any trailing derivation.
+///
+/// Unlike [`dpk_to_pk`], a bare xpub is accepted: the trailing derivation does not change
+/// the root public key. That rule gates which keys may *encrypt* a backup, so it must not
+/// reject a key offered to decrypt one.
+pub fn dpk_to_root_pk(key: &DescriptorPublicKey) -> Result<bitcoin::secp256k1::PublicKey, Error> {
+    match key {
+        DescriptorPublicKey::XPub(k) => Ok(k.xkey.public_key),
+        DescriptorPublicKey::MultiXPub(k) => Ok(k.xkey.public_key),
+        DescriptorPublicKey::Single(_) => Err(Error::InvalidKeyExpression),
+    }
+}
+
 pub fn dpk_to_pk(key: &DescriptorPublicKey) -> Result<bitcoin::secp256k1::PublicKey, Error> {
     let (key, path, wildcard) = match key {
         DescriptorPublicKey::Single(_) => return Err(Error::InvalidKeyExpression),
@@ -175,6 +188,56 @@ pub mod tests {
             188, 208, 73, 193, 47, 7, 131, 47, 44, 246, 163, 181, 23, 8,
         ];
         secp256k1::PublicKey::from_slice(&raw).unwrap()
+    }
+
+    #[test]
+    fn dpk_to_root_pk_accepts_bare_xpub() {
+        let single_str = "02e6642fd69bd211f93f7f1f36ca51a26a5290eb2dd1b0d8279a87bb0d480c8443";
+        let xpub = bip32::Xpub {
+            network: bitcoin::NetworkKind::Test,
+            depth: 1,
+            parent_fingerprint: Fingerprint::from_str("00000000").unwrap(),
+            child_number: ChildNumber::from_normal_idx(0).unwrap(),
+            public_key: bitcoin::secp256k1::PublicKey::from_str(single_str).unwrap(),
+            chain_code: ChainCode::from(&[1u8; 32]),
+        };
+        let bare = DescriptorPublicKey::XPub(DescriptorXKey {
+            origin: None,
+            xkey: xpub,
+            derivation_path: DerivationPath::default(),
+            wildcard: Wildcard::None,
+        });
+        let derived = DescriptorPublicKey::XPub(DescriptorXKey {
+            origin: None,
+            xkey: xpub,
+            derivation_path: DerivationPath::from_str("0").unwrap(),
+            wildcard: Wildcard::Unhardened,
+        });
+
+        // The encoding-side gate rejects the bare xpub, but both forms share a root
+        // pubkey, so a bare xpub decrypts what the derived form encrypted.
+        assert_eq!(dpk_to_pk(&bare), Err(Error::InvalidKeyExpression));
+        let expected = bitcoin::secp256k1::PublicKey::from_str(single_str).unwrap();
+        assert_eq!(dpk_to_root_pk(&bare).unwrap(), expected);
+        assert_eq!(
+            dpk_to_root_pk(&derived).unwrap(),
+            dpk_to_pk(&derived).unwrap()
+        );
+    }
+
+    #[test]
+    fn dpk_to_root_pk_rejects_literal_pubkey() {
+        let single = DescriptorPublicKey::Single(SinglePub {
+            origin: None,
+            key: SinglePubKey::FullKey(
+                bitcoin::PublicKey::from_str(
+                    "02e6642fd69bd211f93f7f1f36ca51a26a5290eb2dd1b0d8279a87bb0d480c8443",
+                )
+                .unwrap(),
+            ),
+        });
+
+        assert_eq!(dpk_to_root_pk(&single), Err(Error::InvalidKeyExpression));
     }
 
     #[test]

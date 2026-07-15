@@ -417,8 +417,9 @@ async fn main() -> Result<(), CliError> {
                 });
 
                 if let Some(k) = key {
-                    let (pks, _) = bip138::descriptor::dpks_to_derivation_keys_paths(&vec![k]);
-                    if pks.is_empty() || key_tx.send(pks[0]).is_err() {
+                    let pk = bip138::descriptor::dpk_to_root_pk(&k)
+                        .map_err(CliError::FailedToDecrypt)?;
+                    if key_tx.send(pk).is_err() {
                         stop.store(true, Ordering::SeqCst);
                     }
                 }
@@ -495,9 +496,10 @@ async fn main() -> Result<(), CliError> {
                 let Some(k) = key else {
                     return Err(CliError::NoKeys);
                 };
-                let (pks, _) = bip138::descriptor::dpks_to_derivation_keys_paths(&vec![k]);
+                let pk =
+                    bip138::descriptor::dpk_to_root_pk(&k).map_err(CliError::FailedToDecrypt)?;
                 let decrypted = backup
-                    .set_keys(pks)
+                    .set_keys(vec![pk])
                     .decrypt()
                     .map_err(CliError::FailedToDecrypt)?;
                 decrypted_to_document(decrypted)?
