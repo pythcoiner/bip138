@@ -489,7 +489,13 @@ pub fn decode_plaintext(bytes: &[u8]) -> Result<Vec<(Content, Vec<u8>)>, Error> 
 
 /// Encode following this format:
 /// <LENGTH><DERIVATION_PATH_1><DERIVATION_PATH_2><..><DERIVATION_PATH_N>
+///
+/// The vector is sorted and deduplicated, so the encoding does not leak the caller's
+/// ordering. This mirrors `encode_individual_secrets`.
 pub fn encode_derivation_paths(derivation_paths: Vec<DerivationPath>) -> Result<Vec<u8>, Error> {
+    let mut derivation_paths = derivation_paths;
+    derivation_paths.sort();
+    derivation_paths.dedup();
     if derivation_paths.len() > u8::MAX as usize {
         return Err(Error::DerivPathLength);
     }
@@ -1675,9 +1681,12 @@ mod tests {
 
     #[test]
     fn test_encode_too_much_deriv_paths() {
+        // Distinct paths: duplicates would be deduplicated away before the length check.
         let mut deriv_paths = vec![];
-        for _ in 0..256 {
-            deriv_paths.push(DerivationPath::from_str("0/1h/2/3h").unwrap());
+        for i in 0..256u32 {
+            deriv_paths.push(DerivationPath::from(vec![
+                ChildNumber::from_normal_idx(i).unwrap(),
+            ]));
         }
         assert_eq!(deriv_paths.len(), 256);
         let res = encode_derivation_paths(deriv_paths);
@@ -2095,9 +2104,12 @@ mod derivation_paths {
                 panic!("Derivation path serialization failed: {description}");
             }
 
-            // deserialize
+            // deserialize; the encoder normalizes, so compare against the normalized input
             if let Some(serialized) = expected {
                 let (_, paths2) = parse_derivation_paths(&serialized).expect(&description);
+                let mut paths = paths;
+                paths.sort();
+                paths.dedup();
                 if paths != paths2 {
                     panic!("Derivation path deserialization failed: {description}");
                 }
@@ -2158,6 +2170,7 @@ mod individual_secrets_vectors {
             if let Some(exp) = expected {
                 let (_, mut parsed) = parse_individual_secrets(&exp).expect(&description);
                 secrets.sort();
+                secrets.dedup();
                 parsed.sort();
 
                 if secrets != parsed {
