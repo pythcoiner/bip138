@@ -245,8 +245,16 @@ pub fn xor(a: &[u8; 32], b: &[u8; 32]) -> [u8; 32] {
 pub fn nonce() -> [u8; 12] {
     let mut rng = OsRng;
     let mut nonce = [0u8; 12];
-    rng.try_fill_bytes(&mut nonce)
-        .expect("os rng must not fail");
+    // the spec requires a fresh draw when the rng yields an all-zero nonce;
+    // two zero draws in a row means the rng is broken, the zero nonce then
+    // flows to encrypt_with_nonce which rejects it
+    for _ in 0..2 {
+        rng.try_fill_bytes(&mut nonce)
+            .expect("os rng must not fail");
+        if nonce != [0u8; 12] {
+            break;
+        }
+    }
     nonce
 }
 
