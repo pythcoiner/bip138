@@ -16,7 +16,7 @@ use std::{
     env,
     fs::{self, File},
     io::Write,
-    path::PathBuf,
+    path::{Path, PathBuf},
     str::FromStr,
 };
 
@@ -143,7 +143,7 @@ enum Commands {
         #[arg(short, long)]
         file: Option<String>,
 
-        /// The key containing a xpub
+        /// File containing a xpub
         #[arg(short, long)]
         key: Option<String>,
 
@@ -347,6 +347,7 @@ async fn main() -> Result<(), CliError> {
                 }
             };
 
+            let key_given = key.is_some();
             let key_path = match key {
                 Some(path) => {
                     let mut xpub_path = PathBuf::new();
@@ -359,11 +360,7 @@ async fn main() -> Result<(), CliError> {
                     xpub_path
                 }
             };
-            let key = if let Ok(k) = fs::read_to_string(key_path) {
-                DescriptorPublicKey::from_str(k.trim()).ok()
-            } else {
-                None
-            };
+            let key = read_key_file(&key_path, key_given)?;
 
             let data = fs::read(&input_path).map_err(CliError::ReadError)?;
 
@@ -583,6 +580,18 @@ fn fetch_log_to_stderr(msg: String) {
     eprintln!("{msg}");
     if let Err(err) = std::io::stderr().flush() {
         eprintln!("warning: cannot flush stderr: {err:?}");
+    }
+}
+
+/// Read the decryption xpub from `path`. A missing file is an error only when the user
+/// asked for that path: the default one is a convenience, and falls back to a device.
+fn read_key_file(path: &Path, requested: bool) -> Result<Option<DescriptorPublicKey>, CliError> {
+    match fs::read_to_string(path) {
+        Ok(data) => Ok(Some(
+            DescriptorPublicKey::from_str(data.trim()).map_err(CliError::CantConvertToXpub)?,
+        )),
+        Err(err) if requested => Err(CliError::ReadError(err)),
+        Err(_) => Ok(None),
     }
 }
 
@@ -998,6 +1007,50 @@ mod tests {
             metadata.derivation_paths,
             vec![DerivationPath::from_str("48'/1'/0'").unwrap()]
         );
+    }
+
+    #[test]
+    fn read_key_file_reads_key() {
+        let path = env::temp_dir().join(format!("bip138-read-key-{}.txt", std::process::id()));
+        fs::write(&path, format!("{KEY}\n")).unwrap();
+
+        let key = read_key_file(&path, true).unwrap();
+
+        assert_eq!(key, Some(DescriptorPublicKey::from_str(KEY).unwrap()));
+        fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn read_key_file_reports_missing_requested_file() {
+        let path =
+            env::temp_dir().join(format!("bip138-read-key-absent-{}.txt", std::process::id()));
+        let _ = fs::remove_file(&path);
+
+        let err = read_key_file(&path, true).unwrap_err();
+
+        assert!(matches!(err, CliError::ReadError(_)), "got {err:?}");
+    }
+
+    #[test]
+    fn read_key_file_ignores_missing_default_file() {
+        let path = env::temp_dir().join(format!(
+            "bip138-read-key-default-{}.txt",
+            std::process::id()
+        ));
+        let _ = fs::remove_file(&path);
+
+        assert_eq!(read_key_file(&path, false).unwrap(), None);
+    }
+
+    #[test]
+    fn read_key_file_rejects_unparsable_key() {
+        let path = env::temp_dir().join(format!("bip138-read-key-bad-{}.txt", std::process::id()));
+        fs::write(&path, "not-a-key").unwrap();
+
+        let err = read_key_file(&path, true).unwrap_err();
+
+        assert!(matches!(err, CliError::CantConvertToXpub(_)), "got {err:?}");
+        fs::remove_file(path).unwrap();
     }
 
     #[cfg(feature = "devices")]
