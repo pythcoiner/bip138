@@ -1098,31 +1098,43 @@ pub fn parse_encrypted_payload_lengths(bytes: &[u8]) -> Result<Vec<usize>, Error
         return Err(Error::EmptyBytes);
     }
 
-    let mut lengths = Vec::new();
-    let mut offset = 0usize;
+    // The first payload is mandated by the spec, its errors bubble up. Vendors
+    // may append more payloads after it; anything else there is trailing bytes
+    // that parsers must ignore, so a parse failure ends the walk instead.
+    let (data_len, mut offset) = parse_encrypted_payload_length(bytes, 0)?;
+    let mut lengths = vec![data_len];
     while offset < bytes.len() {
-        check_offset_lookahead(offset, bytes, 12)?;
-        let nonce: [u8; 12] = bytes[offset..offset + 12].try_into().expect("checked");
-        if nonce == [0u8; 12] {
-            return Err(Error::ZeroedNonce);
-        }
-        offset = offset.checked_add(12).ok_or(Error::OffsetOverflow)?;
-
-        let (VarInt(data_len), incr) = parse_varint(&bytes[offset..]).ok_or(Error::VarInt)?;
-        let data_len = usize::try_from(data_len).map_err(|_| Error::DataLength)?;
-        if data_len == 0 {
-            return Err(Error::CypherTextEmpty);
-        }
-        offset = offset.checked_add(incr).ok_or(Error::OffsetOverflow)?;
-        let end = offset.checked_add(data_len).ok_or(Error::OffsetOverflow)?;
-        if end > bytes.len() {
-            return Err(Error::Corrupted);
-        }
+        let Ok((data_len, end)) = parse_encrypted_payload_length(bytes, offset) else {
+            break;
+        };
         lengths.push(data_len);
         offset = end;
     }
 
     Ok(lengths)
+}
+
+/// Parse one `<NONCE><LENGTH><CYPHERTEXT>` payload at `offset`, returning the
+/// cyphertext length and the offset of the byte after the payload.
+fn parse_encrypted_payload_length(bytes: &[u8], offset: usize) -> Result<(usize, usize), Error> {
+    check_offset_lookahead(offset, bytes, 12)?;
+    let nonce: [u8; 12] = bytes[offset..offset + 12].try_into().expect("checked");
+    if nonce == [0u8; 12] {
+        return Err(Error::ZeroedNonce);
+    }
+    let offset = offset.checked_add(12).ok_or(Error::OffsetOverflow)?;
+
+    let (VarInt(data_len), incr) = parse_varint(&bytes[offset..]).ok_or(Error::VarInt)?;
+    let data_len = usize::try_from(data_len).map_err(|_| Error::DataLength)?;
+    if data_len == 0 {
+        return Err(Error::CypherTextEmpty);
+    }
+    let offset = offset.checked_add(incr).ok_or(Error::OffsetOverflow)?;
+    let end = offset.checked_add(data_len).ok_or(Error::OffsetOverflow)?;
+    if end > bytes.len() {
+        return Err(Error::Corrupted);
+    }
+    Ok((data_len, end))
 }
 
 fn parse_varint(bytes: &[u8]) -> Option<(VarInt, usize)> {
@@ -1603,6 +1615,27 @@ mod tests {
         let mut bytes = [3u8; 12].to_vec();
         bytes.push(0x00);
         assert_eq!(parse_encrypted_payload(&bytes), Err(Error::CypherTextEmpty));
+    }
+
+    #[test]
+    fn test_parse_encrypted_payload_lengths_ignores_trailing() {
+        let payload = encode_encrypted_payload([3; 12], &[1, 2, 3, 4]).unwrap();
+        // trailing bytes that are not a payload are ignored
+        let mut bytes = payload.clone();
+        bytes.extend_from_slice(&[0xFF; 5]);
+        assert_eq!(parse_encrypted_payload_lengths(&bytes).unwrap(), vec![4]);
+        // a second full payload is still enumerated
+        let mut bytes = payload.clone();
+        bytes.extend_from_slice(&encode_encrypted_payload([4; 12], &[5; 11]).unwrap());
+        assert_eq!(
+            parse_encrypted_payload_lengths(&bytes).unwrap(),
+            vec![4, 11]
+        );
+        // the first payload stays mandatory
+        assert_eq!(
+            parse_encrypted_payload_lengths(&[0xFF; 5]),
+            Err(Error::Corrupted)
+        );
     }
 
     #[test]
@@ -2724,6 +2757,13 @@ mod encrypted_backup {
             assert_eq!(
                 cyphertext_t, cyphertext,
                 "Cyphertext mismatch with trailing bytes: {description}"
+            );
+
+            let lengths = decode_v1_encrypted_payload_lengths(&encrypted).expect(description);
+            let lengths_t = decode_v1_encrypted_payload_lengths(&with_trailer).expect(description);
+            assert_eq!(
+                lengths, lengths_t,
+                "Payload lengths mismatch with trailing bytes: {description}"
             );
 
             for key in &keys {

@@ -797,6 +797,28 @@ mod string_tests {
 }
 
 #[cfg(all(test, feature = "rand"))]
+mod metadata_tests {
+    use super::*;
+
+    #[test]
+    fn metadata_ignores_trailing_bytes() {
+        let descriptor = descriptor::tests::descr_1();
+        let bytes = EncryptedBackup::new()
+            .set_payload(&descriptor)
+            .unwrap()
+            .encrypt()
+            .unwrap()
+            .bytes;
+        let metadata = EncryptedMetadata::from_encrypted_payload(&bytes).unwrap();
+
+        let mut with_trailer = bytes;
+        with_trailer.extend_from_slice(&[0xDE, 0xAD, 0xBE, 0xEF]);
+        let metadata_t = EncryptedMetadata::from_encrypted_payload(&with_trailer).unwrap();
+        assert_eq!(metadata, metadata_t);
+    }
+}
+
+#[cfg(all(test, feature = "rand"))]
 mod skip_unimplemented_tests {
     use super::*;
 
