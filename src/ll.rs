@@ -179,9 +179,10 @@ pub fn parse_content(bytes: &[u8]) -> Result<(usize, Content), Error> {
         t if t < CONTENT_UPGRADE => {
             let (VarInt(data_len), offset) =
                 parse_varint(&bytes[1..]).ok_or(Error::ContentMetadata)?;
+            let data_len = usize::try_from(data_len).map_err(|_| Error::ContentMetadata)?;
             let start = 1 + offset;
-            check_offset_lookahead(start, bytes, data_len as usize)?;
-            let end = start + data_len as usize;
+            check_offset_lookahead(start, bytes, data_len)?;
+            let end = start + data_len;
             if len < end {
                 return Err(Error::ContentMetadata);
             }
@@ -1081,8 +1082,7 @@ pub fn parse_encrypted_payload(
     offset = increment_offset(bytes, offset, 12)?;
     // <LENGTH>
     let (VarInt(data_len), incr) = parse_varint(&bytes[offset..]).ok_or(Error::VarInt)?;
-    // FIXME: in 32bit systems usize is 32 bits
-    let data_len = data_len as usize;
+    let data_len = usize::try_from(data_len).map_err(|_| Error::DataLength)?;
     if data_len == 0 {
         return Err(Error::CypherTextEmpty);
     }
