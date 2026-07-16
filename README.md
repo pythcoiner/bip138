@@ -29,16 +29,20 @@ the CLI will automatically try to fetch a set of xpubs from it.
 
 ```
 $ beb --help
-Usage: beb <COMMAND>
+BIP138 Compact encryption scheme for Non-seed wallet data
+
+Usage: beb [OPTIONS] <COMMAND>
 
 Commands:
   encrypt  Encrypt some descriptor
   decrypt  Decrypt an encrypted descriptor with a given xpub
+  inspect  Inspect an encrypted descriptor without decrypting it
   help     Print this message or the help of the given subcommand(s)
 
 Options:
-  -h, --help     Print help
-  -V, --version  Print version
+  -o, --output <OUTPUT>  Write command output to file instead of stdout
+  -h, --help             Print help
+  -V, --version          Print version
 ```
 ```
 $ beb encrypt --help
@@ -47,9 +51,46 @@ Encrypt some descriptor
 Usage: beb encrypt [OPTIONS]
 
 Options:
-  -f, --file <FILE>      Input file containing the descriptor
-  -o, --output <OUTPUT>  Optional output to encrypted descriptor
-  -h, --help             Print help
+  -f, --file <FILE>
+          Input file containing the descriptor
+
+      --msg <MSG>
+          Message to add before the descriptor payload
+
+      --keys <KEYS>
+          File listing outer-to-inner wrapping key levels
+
+          One level per line, outermost first: each level encrypts the one
+          below it, and the last line encrypts the descriptor itself.
+
+          A line is one key, several keys separated by `|`, or a note and its
+          keys separated by `||`:
+
+              [48bfdc46/48h/1h/10h/2h]tpubDF6MC...
+              [c658b283/48h/1h/10h/2h]tpubDFHe6... | [748f7513/48h/1h/10h/2h]tpubDEwiF...
+              backup 2026 || [c658b283/48h/1h/10h/2h]tpubDFHe6...
+
+          Each key must carry its origin, as `[fingerprint/derivation]xpub`,
+          and any one key of a level decrypts that level. The separator before
+          a note is `||`, not `|`: with a single `|`, `Coldcard | xpub...`
+          reads `Coldcard` as a key and fails.
+
+          A note is stored encrypted at its level and shows up when that level
+          is decrypted. Blank lines and lines starting with `#` are ignored.
+          Cannot be used with --device.
+
+          Example:
+
+              # outer level, either signer can unwrap it
+              backup 2026 || [c658b283/48h/1h/10h/2h]tpubDFHe6... | [748f7513/48h/1h/10h/2h]tpubDEwiF...
+              # inner level, holds the descriptor
+              [48bfdc46/48h/1h/10h/2h]tpubDF6MC...
+
+  -o, --output <OUTPUT>
+          Write command output to file instead of stdout
+
+  -h, --help
+          Print help (see a summary with '-h')
 
 ```
 ```
@@ -60,8 +101,8 @@ Usage: beb decrypt [OPTIONS]
 
 Options:
   -f, --file <FILE>      Input file to be decrypted
-  -k, --key <KEY>        The key containing a xpub
-  -o, --output <OUTPUT>  Optional decrypted descriptor
+  -k, --key <KEY>        File containing a xpub
+  -o, --output <OUTPUT>  Write command output to file instead of stdout
   -h, --help             Print help
 
 ```

@@ -32,6 +32,10 @@ const HARDENED_BIT: u32 = 1 << 31;
 struct Cli {
     #[command(subcommand)]
     command: Commands,
+
+    /// Write command output to file instead of stdout
+    #[arg(short, long, global = true)]
+    output: Option<String>,
 }
 
 #[derive(Debug)]
@@ -45,6 +49,7 @@ pub enum CliError {
     WriteError(std::io::Error),
     ReadError(std::io::Error),
     StdinError(std::io::Error),
+    StdoutError(std::io::Error),
     FailedToEncrypt(bip138::Error),
     FailedToDecrypt(bip138::Error),
     FailedToInspect(bip138::Error),
@@ -75,6 +80,7 @@ impl std::fmt::Display for CliError {
             CliError::WriteError(err) => write!(f, "Cannot write file: {err:?}"),
             CliError::ReadError(err) => write!(f, "Cannot read file: {err:?}"),
             CliError::StdinError(err) => write!(f, "Cannot read stdin: {err:?}"),
+            CliError::StdoutError(err) => write!(f, "Cannot write stdout: {err:?}"),
             CliError::FailedToEncrypt(err) => write!(f, "Cannot encrypt: {err:?}"),
             CliError::FailedToDecrypt(err) => write!(f, "Cannot decrypt: {err:?}"),
             CliError::FailedToInspect(err) => write!(f, "Cannot inspect: {err:?}"),
@@ -100,10 +106,6 @@ enum Commands {
         /// Input file containing the descriptor
         #[arg(short, long)]
         file: Option<String>,
-
-        /// Optional output to encrypted descriptor
-        #[arg(short, long)]
-        output: Option<String>,
 
         /// Message to add before the descriptor payload
         #[arg(long)]
@@ -153,10 +155,6 @@ enum Commands {
         #[arg(short, long)]
         key: Option<String>,
 
-        /// Optional decrypted descriptor
-        #[arg(short, long)]
-        output: Option<String>,
-
         /// Fetch keys from a testnet signing device
         #[cfg(feature = "devices")]
         #[arg(long)]
@@ -180,10 +178,6 @@ enum Commands {
     Fetch {
         /// Derivation path to fetch
         derivation: String,
-
-        /// File to append the xpub to
-        #[arg(short, long)]
-        file: Option<String>,
 
         /// Fetch from a testnet signing device
         #[arg(long)]
@@ -240,13 +234,12 @@ fn read_stdin_args(reader: impl BufRead) -> Result<Vec<OsString>, CliError> {
 
 #[tokio::main]
 async fn main() -> Result<(), CliError> {
-    let cli = parse_cli()?;
+    let Cli { command, output } = parse_cli()?;
 
     // Handle the specific subcommand
-    match &cli.command {
+    match &command {
         Commands::Encrypt {
             file,
-            output,
             msg,
             keys,
             #[cfg(feature = "devices")]
@@ -265,7 +258,7 @@ async fn main() -> Result<(), CliError> {
                 }
             };
 
-            let output_path = match output {
+            let output_path = match &output {
                 Some(path) => {
                     let mut output_path = PathBuf::new();
                     output_path.push(path);
@@ -371,7 +364,6 @@ async fn main() -> Result<(), CliError> {
         Commands::Decrypt {
             file,
             key,
-            output,
             #[cfg(feature = "devices")]
             testnet,
             #[cfg(feature = "devices")]
@@ -387,19 +379,6 @@ async fn main() -> Result<(), CliError> {
                     let mut descriptor_path = env::current_dir().map_err(CliError::CwdError)?;
                     descriptor_path.push("descriptor.txt");
                     descriptor_path
-                }
-            };
-
-            let output_path = match output {
-                Some(path) => {
-                    let mut output_path = PathBuf::new();
-                    output_path.push(path);
-                    output_path
-                }
-                None => {
-                    let mut output_path = env::current_dir().map_err(CliError::CwdError)?;
-                    output_path.push("descriptor.txt");
-                    output_path
                 }
             };
 
@@ -425,7 +404,7 @@ async fn main() -> Result<(), CliError> {
                 .map_err(CliError::FailedToDecrypt)?;
 
             #[cfg(feature = "devices")]
-            let document = {
+            let mut document = {
                 use std::sync::{
                     Arc,
                     atomic::{AtomicBool, Ordering},
@@ -497,12 +476,8 @@ async fn main() -> Result<(), CliError> {
                             .ordering([48, 84, 86])
                             .prompt(*prompt)
                             .collect_until(
-                                |msg| {
-                                    println!("{msg}");
-                                    if let Err(err) = std::io::stdout().flush() {
-                                        eprintln!("warning: cannot flush stdout: {err:?}");
-                                    }
-                                },
+                                // stderr, so it never mixes into the descriptor on stdout
+                                fetch_log_to_stderr,
                                 move |_, xpub| {
                                     if key_tx.send(xpub.public_key).is_err() {
                                         send_stop.store(true, Ordering::SeqCst);
@@ -548,7 +523,7 @@ async fn main() -> Result<(), CliError> {
             };
 
             #[cfg(not(feature = "devices"))]
-            let document = {
+            let mut document = {
                 let Some(k) = key else {
                     return Err(CliError::NoKeys);
                 };
@@ -560,8 +535,20 @@ async fn main() -> Result<(), CliError> {
                     .map_err(CliError::FailedToDecrypt)?;
                 decrypted_to_document(decrypted)?
             };
-            fs::write(&output_path, &document).map_err(CliError::WriteError)?;
-            println!("descriptor written to {output_path:?}");
+            // -o gets what stdout would have shown, trailing newline included
+            document.push(b'\n');
+            match &output {
+                Some(path) => {
+                    fs::write(path, &document).map_err(CliError::WriteError)?;
+                    println!("descriptor written to {path:?}");
+                }
+                None => {
+                    let mut stdout = io::stdout();
+                    // bytes, not text: a wrapped BIP138 payload decrypts to a nested backup
+                    stdout.write_all(&document).map_err(CliError::StdoutError)?;
+                    stdout.flush().map_err(CliError::StdoutError)?;
+                }
+            }
         }
         Commands::Inspect { file } => {
             let input_path = match file {
@@ -599,12 +586,17 @@ async fn main() -> Result<(), CliError> {
                 "ciphertext_bytes": metadata.ciphertext_lens,
             });
             let json = serde_json::to_string_pretty(&json).map_err(CliError::JsonError)?;
-            println!("{json}");
+            match &output {
+                // the file gets what stdout would have shown, trailing newline included
+                Some(path) => {
+                    fs::write(path, format!("{json}\n")).map_err(CliError::WriteError)?;
+                }
+                None => println!("{json}"),
+            }
         }
         #[cfg(feature = "devices")]
         Commands::Fetch {
             derivation,
-            file,
             testnet,
         } => {
             let path = DerivationPath::from_str(derivation.trim())
@@ -623,8 +615,10 @@ async fn main() -> Result<(), CliError> {
             .map_err(CliError::FailedToFetchXpub)?
             .ok_or(CliError::NoKeys)?;
 
+            // appended, never replaced: the output file collects the xpubs of
+            // several fetches, and each one needs its own line
             let xpub = origin_xpub(fetched.fingerprint, &path, &fetched.xpub);
-            match file {
+            match &output {
                 Some(path) => append_line(path, &xpub)?,
                 None => println!("{xpub}"),
             }
