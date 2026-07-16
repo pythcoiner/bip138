@@ -14,7 +14,7 @@ To build the cli without device support:
 cargo build --bin beb --release --no-default-features --features="cli"
 ```
 
-or with devices support:
+or with devices support, which needs `libudev-dev` and `pkg-config` installed:
 
 ```
 cargo build --bin beb --release --no-default-features --features="cli,devices"

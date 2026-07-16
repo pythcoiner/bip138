@@ -19,6 +19,8 @@ jobs:
         with:
           toolchain: 1.88
           components: rustfmt, clippy
+      - name: install device deps
+        run: sudo apt-get update && sudo apt-get install -y libudev-dev pkg-config
       - name: lint
         run: ./contrib/lint.sh
 
@@ -37,6 +39,8 @@ jobs:
       - uses: dtolnay/rust-toolchain@master
         with:
           toolchain: ${{ matrix.toolchain }}
+      - name: install device deps
+        run: sudo apt-get update && sudo apt-get install -y libudev-dev pkg-config
       - name: tests
         run: ./contrib/test.sh
   build:

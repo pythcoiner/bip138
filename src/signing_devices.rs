@@ -393,6 +393,107 @@ fn path_purpose(path: &DerivationPath) -> Option<u32> {
     path.to_u32_vec().first().map(|index| index & !HARDENED_BIT)
 }
 
+pub async fn list(network: Network) -> Result<Vec<Box<dyn HWI + Send>>, Box<dyn StdError>> {
+    let mut hws = Vec::new();
+
+    if let Ok(device) = SpecterSimulator::try_connect().await {
+        hws.push(device.into());
+    }
+
+    if let Ok(devices) = Specter::enumerate().await {
+        for device in devices {
+            hws.push(device.into());
+        }
+    }
+
+    match Jade::enumerate().await {
+        Err(e) => println!("{e:?}"),
+        Ok(devices) => {
+            for device in devices {
+                let device = device.with_network(network);
+                if let Ok(info) = device.get_info().await {
+                    if info.jade_state == jade::api::JadeState::Locked {
+                        if let Err(e) = device.auth().await {
+                            eprintln!("auth {e:?}");
+                            continue;
+                        }
+                    }
+
+                    hws.push(device.into());
+                }
+            }
+        }
+    }
+
+    if let Ok(device) = LedgerSimulator::try_connect().await {
+        hws.push(device.into());
+    }
+
+    let api = Box::new(HidApi::new().unwrap());
+
+    for device_info in api.device_list() {
+        if async_hwi::bitbox::is_bitbox02(device_info) {
+            if let Ok(device) = device_info.open_device(&api) {
+                let cache_dir = bitbox_pairing_cache_dir()?;
+                fs::create_dir_all(&cache_dir)?;
+                let cache_dir = cache_dir
+                    .to_str()
+                    .ok_or("BitBox02 pairing cache path is not UTF-8")?;
+                let cache = Box::new(async_hwi::bitbox::api::PersistedNoiseConfig::new(cache_dir));
+                if let Ok(device) =
+                    PairingBitbox02::<runtime::TokioRuntime>::connect(device, Some(cache)).await
+                {
+                    if let Ok(device) = device.wait_confirm().await {
+                        let bb02 = BitBox02::from(device).with_network(network);
+                        hws.push(bb02.into());
+                    }
+                }
+            }
+        }
+        if device_info.vendor_id() == coldcard::api::COINKITE_VID
+            && device_info.product_id() == coldcard::api::CKCC_PID
+        {
+            if let Some(sn) = device_info.serial_number() {
+                if let Ok((cc, _)) = coldcard::api::Coldcard::open(&api, sn, None) {
+                    let hw = coldcard::Coldcard::from(cc);
+                    hws.push(hw.into())
+                }
+            }
+        }
+    }
+
+    for detected in Ledger::<TransportHID>::enumerate(&api) {
+        if let Ok(device) = Ledger::<TransportHID>::connect(&api, detected) {
+            hws.push(device.into());
+        }
+    }
+
+    Ok(hws)
+}
+
+#[cfg(target_os = "macos")]
+fn bitbox_pairing_cache_dir() -> Result<PathBuf, Box<dyn StdError>> {
+    Ok(PathBuf::from(home_dir()?)
+        .join("Library")
+        .join("Application Support")
+        .join("bip138"))
+}
+
+#[cfg(target_os = "windows")]
+fn bitbox_pairing_cache_dir() -> Result<PathBuf, Box<dyn StdError>> {
+    Ok(PathBuf::from(env::var_os("APPDATA").ok_or("APPDATA is not set")?).join("bip138"))
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "windows")))]
+fn bitbox_pairing_cache_dir() -> Result<PathBuf, Box<dyn StdError>> {
+    Ok(PathBuf::from(home_dir()?).join(".bip138"))
+}
+
+#[cfg(not(target_os = "windows"))]
+fn home_dir() -> Result<std::ffi::OsString, Box<dyn StdError>> {
+    env::var_os("HOME").ok_or_else(|| "HOME is not set".into())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -561,105 +662,4 @@ mod tests {
 
         assert_eq!(path, DerivationPath::from_str("48h/0h/0h/1h").unwrap());
     }
-}
-
-pub async fn list(network: Network) -> Result<Vec<Box<dyn HWI + Send>>, Box<dyn StdError>> {
-    let mut hws = Vec::new();
-
-    if let Ok(device) = SpecterSimulator::try_connect().await {
-        hws.push(device.into());
-    }
-
-    if let Ok(devices) = Specter::enumerate().await {
-        for device in devices {
-            hws.push(device.into());
-        }
-    }
-
-    match Jade::enumerate().await {
-        Err(e) => println!("{e:?}"),
-        Ok(devices) => {
-            for device in devices {
-                let device = device.with_network(network);
-                if let Ok(info) = device.get_info().await {
-                    if info.jade_state == jade::api::JadeState::Locked {
-                        if let Err(e) = device.auth().await {
-                            eprintln!("auth {e:?}");
-                            continue;
-                        }
-                    }
-
-                    hws.push(device.into());
-                }
-            }
-        }
-    }
-
-    if let Ok(device) = LedgerSimulator::try_connect().await {
-        hws.push(device.into());
-    }
-
-    let api = Box::new(HidApi::new().unwrap());
-
-    for device_info in api.device_list() {
-        if async_hwi::bitbox::is_bitbox02(device_info) {
-            if let Ok(device) = device_info.open_device(&api) {
-                let cache_dir = bitbox_pairing_cache_dir()?;
-                fs::create_dir_all(&cache_dir)?;
-                let cache_dir = cache_dir
-                    .to_str()
-                    .ok_or("BitBox02 pairing cache path is not UTF-8")?;
-                let cache = Box::new(async_hwi::bitbox::api::PersistedNoiseConfig::new(cache_dir));
-                if let Ok(device) =
-                    PairingBitbox02::<runtime::TokioRuntime>::connect(device, Some(cache)).await
-                {
-                    if let Ok(device) = device.wait_confirm().await {
-                        let bb02 = BitBox02::from(device).with_network(network);
-                        hws.push(bb02.into());
-                    }
-                }
-            }
-        }
-        if device_info.vendor_id() == coldcard::api::COINKITE_VID
-            && device_info.product_id() == coldcard::api::CKCC_PID
-        {
-            if let Some(sn) = device_info.serial_number() {
-                if let Ok((cc, _)) = coldcard::api::Coldcard::open(&api, sn, None) {
-                    let hw = coldcard::Coldcard::from(cc);
-                    hws.push(hw.into())
-                }
-            }
-        }
-    }
-
-    for detected in Ledger::<TransportHID>::enumerate(&api) {
-        if let Ok(device) = Ledger::<TransportHID>::connect(&api, detected) {
-            hws.push(device.into());
-        }
-    }
-
-    Ok(hws)
-}
-
-#[cfg(target_os = "macos")]
-fn bitbox_pairing_cache_dir() -> Result<PathBuf, Box<dyn StdError>> {
-    Ok(PathBuf::from(home_dir()?)
-        .join("Library")
-        .join("Application Support")
-        .join("bip138"))
-}
-
-#[cfg(target_os = "windows")]
-fn bitbox_pairing_cache_dir() -> Result<PathBuf, Box<dyn StdError>> {
-    Ok(PathBuf::from(env::var_os("APPDATA").ok_or("APPDATA is not set")?).join("bip138"))
-}
-
-#[cfg(not(any(target_os = "macos", target_os = "windows")))]
-fn bitbox_pairing_cache_dir() -> Result<PathBuf, Box<dyn StdError>> {
-    Ok(PathBuf::from(home_dir()?).join(".bip138"))
-}
-
-#[cfg(not(target_os = "windows"))]
-fn home_dir() -> Result<std::ffi::OsString, Box<dyn StdError>> {
-    env::var_os("HOME").ok_or_else(|| "HOME is not set".into())
 }
