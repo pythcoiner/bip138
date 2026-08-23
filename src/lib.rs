@@ -11,11 +11,14 @@ use descriptor::descr_to_dpks;
 
 use crate::miniscript::{
     Descriptor, DescriptorPublicKey,
-    bitcoin::{bip32::DerivationPath, secp256k1},
+    bitcoin::{
+        bip32::{ChildNumber, DerivationPath},
+        secp256k1,
+    },
 };
 #[cfg(feature = "descriptor_backup")]
 pub use descriptor_backup::{DescriptorBackup, DescriptorSet, parse_descriptor_backup};
-pub use ll::{Content, Padding};
+pub use ll::{Content, Encryption, Padding, Version};
 #[cfg(feature = "descriptor_backup")]
 pub use policy_backup::{PolicyBackup, PolicySet, parse_policy_backup};
 
@@ -25,7 +28,7 @@ pub use tokio;
 pub mod descriptor;
 #[cfg(feature = "descriptor_backup")]
 pub mod descriptor_backup;
-pub mod ll;
+pub use bip138_ll as ll;
 pub mod miniscript;
 #[cfg(feature = "descriptor_backup")]
 pub mod policy_backup;
@@ -33,6 +36,26 @@ pub mod policy_backup;
 pub mod signing_devices;
 #[cfg(feature = "descriptor_backup")]
 pub mod wallet_policy;
+
+/// x-only serialization of a public key, the form the `ll` core keys on.
+pub(crate) fn xonly_key(key: &secp256k1::PublicKey) -> [u8; 32] {
+    key.x_only_public_key().0.serialize()
+}
+
+/// Convert a `bitcoin` derivation path into the `ll` core's own path type.
+pub(crate) fn ll_path(path: &DerivationPath) -> ll::DerivationPath {
+    ll::DerivationPath::from(path.to_u32_vec())
+}
+
+/// Convert an `ll` core derivation path back into a `bitcoin` one.
+pub(crate) fn bitcoin_path(path: &ll::DerivationPath) -> DerivationPath {
+    DerivationPath::from(
+        path.to_u32_vec()
+            .iter()
+            .map(|child| ChildNumber::from(*child))
+            .collect::<Vec<ChildNumber>>(),
+    )
+}
 
 /// Non-fatal signal raised while extracting keys from a descriptor: a key
 /// expression was sorted out of the encryption-key set. The cosigner
@@ -195,7 +218,7 @@ impl EncryptedMetadata {
                 let ciphertext_lens = ll::decode_v1_encrypted_payload_lengths(bytes)?;
                 Ok(Self {
                     version,
-                    derivation_paths,
+                    derivation_paths: derivation_paths.iter().map(bitcoin_path).collect(),
                     individual_secrets,
                     encryption: encryption.into(),
                     nonce,
@@ -227,7 +250,7 @@ impl EncryptedMetadata {
 
         Ok(Self {
             version: Version::V0,
-            derivation_paths,
+            derivation_paths: derivation_paths.iter().map(bitcoin_path).collect(),
             individual_secrets,
             encryption: Encryption::AesGcm256,
             nonce,
@@ -423,35 +446,75 @@ impl EncryptedBackup {
             return Err(Error::InvalidVersion);
         }
         let warnings = self.warnings.clone();
+
+        // SHA-256 and ChaCha20-Poly1305 come from the bundled provider. With `rand`
+        // the OS draws the nonce and decoys; without it the caller supplies them and
+        // the core validates the decoy count.
+        let crypto = ll::crypto::RustBitcoin;
+        let keys = self.keys.iter().map(xonly_key).collect::<Vec<_>>();
+        let derivation_paths = self
+            .derivation_paths
+            .iter()
+            .map(ll_path)
+            .collect::<Vec<_>>();
+
         match (self.encryption, self.version) {
             (Encryption::ChaCha20Poly1305, Version::V1) => {
                 let bytes = match &self.payload {
-                    Payload::Encrypt { payload } => ll::encrypt_chacha20_poly1305_v1(
-                        self.derivation_paths,
-                        self.content.clone(),
-                        self.keys,
-                        payload,
-                        self.padding,
+                    Payload::Encrypt { payload } => {
+                        #[cfg(feature = "rand")]
+                        {
+                            ll::encrypt_chacha20_poly1305_v1(
+                                &crypto,
+                                &mut ll::crypto::OsRandom,
+                                derivation_paths,
+                                self.content.clone(),
+                                keys,
+                                payload,
+                                self.padding,
+                            )?
+                        }
                         #[cfg(not(feature = "rand"))]
-                        nonce,
-                        #[cfg(not(feature = "rand"))]
-                        decoy_individual_secrets,
-                    )?,
+                        {
+                            ll::encrypt_chacha20_poly1305_v1_items_with_decoys(
+                                &crypto,
+                                derivation_paths,
+                                &[(self.content.clone(), payload.as_slice())],
+                                keys,
+                                self.padding,
+                                nonce,
+                                decoy_individual_secrets,
+                            )?
+                        }
+                    }
                     Payload::EncryptMany { payloads } => {
                         let payloads = payloads
                             .iter()
                             .map(|(content, payload)| (content.clone(), payload.as_slice()))
                             .collect::<Vec<_>>();
-                        ll::encrypt_chacha20_poly1305_v1_items(
-                            self.derivation_paths,
-                            &payloads,
-                            self.keys,
-                            self.padding,
-                            #[cfg(not(feature = "rand"))]
-                            nonce,
-                            #[cfg(not(feature = "rand"))]
-                            decoy_individual_secrets,
-                        )?
+                        #[cfg(feature = "rand")]
+                        {
+                            ll::encrypt_chacha20_poly1305_v1_items(
+                                &crypto,
+                                &mut ll::crypto::OsRandom,
+                                derivation_paths,
+                                &payloads,
+                                keys,
+                                self.padding,
+                            )?
+                        }
+                        #[cfg(not(feature = "rand"))]
+                        {
+                            ll::encrypt_chacha20_poly1305_v1_items_with_decoys(
+                                &crypto,
+                                derivation_paths,
+                                &payloads,
+                                keys,
+                                self.padding,
+                                nonce,
+                                decoy_individual_secrets,
+                            )?
+                        }
                     }
                     _ => return Err(Error::WrongPayload),
                 };
@@ -505,7 +568,7 @@ impl EncryptedBackup {
             Version::V1 => {
                 let (derivation_paths, individual_secrets, encryption_type, nonce, cyphertext) =
                     ll::decode_v1(bytes)?;
-                self.derivation_paths = derivation_paths;
+                self.derivation_paths = derivation_paths.iter().map(bitcoin_path).collect();
                 self.encryption = encryption_type.into();
                 self.payload = Payload::DecryptV1 {
                     cyphertext,
@@ -608,9 +671,11 @@ impl EncryptedBackup {
                     if self.encryption != Encryption::ChaCha20Poly1305 {
                         return Err(Error::UnsupportedEncryption);
                     }
+                    let crypto = ll::crypto::RustBitcoin;
                     for key in &self.keys {
                         if let Ok(items) = ll::decrypt_chacha20_poly1305_v1(
-                            *key,
+                            &crypto,
+                            xonly_key(key),
                             &individual_secrets.clone(),
                             cyphertext.clone(),
                             *nonce,
@@ -866,9 +931,18 @@ mod skip_unimplemented_tests {
             (Content::Proprietary(vec![0xAA]), b"vendor".as_slice()),
             (Content::Bip380, descr_str.as_bytes()),
         ];
-        let bytes =
-            ll::encrypt_chacha20_poly1305_v1_items(vec![], &items, keys.clone(), Padding::None)
-                .unwrap();
+        let crypto = ll::crypto::RustBitcoin;
+        let mut rng = ll::crypto::OsRandom;
+        let xkeys = keys.iter().map(xonly_key).collect::<Vec<_>>();
+        let bytes = ll::encrypt_chacha20_poly1305_v1_items(
+            &crypto,
+            &mut rng,
+            vec![],
+            &items,
+            xkeys,
+            Padding::None,
+        )
+        .unwrap();
 
         let restored = EncryptedBackup::new()
             .set_encrypted_payload(&bytes)
@@ -884,9 +958,18 @@ mod skip_unimplemented_tests {
         let descriptor = descriptor::tests::descr_1();
         let keys = descriptor.keys().unwrap();
         let items: [(Content, &[u8]); 1] = [(Content::Bip329, b"{\"type\":\"tx\"}".as_slice())];
-        let bytes =
-            ll::encrypt_chacha20_poly1305_v1_items(vec![], &items, keys.clone(), Padding::None)
-                .unwrap();
+        let crypto = ll::crypto::RustBitcoin;
+        let mut rng = ll::crypto::OsRandom;
+        let xkeys = keys.iter().map(xonly_key).collect::<Vec<_>>();
+        let bytes = ll::encrypt_chacha20_poly1305_v1_items(
+            &crypto,
+            &mut rng,
+            vec![],
+            &items,
+            xkeys,
+            Padding::None,
+        )
+        .unwrap();
 
         let restored = EncryptedBackup::new()
             .set_encrypted_payload(&bytes)
@@ -926,9 +1009,18 @@ mod proprietary_tests {
     /// set_payloads.
     fn encrypted(items: &[(Content, &[u8])]) -> (Vec<u8>, Vec<secp256k1::PublicKey>) {
         let keys = descriptor::tests::descr_1().keys().unwrap();
-        let bytes =
-            ll::encrypt_chacha20_poly1305_v1_items(vec![], items, keys.clone(), Padding::None)
-                .unwrap();
+        let crypto = ll::crypto::RustBitcoin;
+        let mut rng = ll::crypto::OsRandom;
+        let xkeys = keys.iter().map(xonly_key).collect::<Vec<_>>();
+        let bytes = ll::encrypt_chacha20_poly1305_v1_items(
+            &crypto,
+            &mut rng,
+            vec![],
+            items,
+            xkeys,
+            Padding::None,
+        )
+        .unwrap();
         (bytes, keys)
     }
 
@@ -1010,83 +1102,6 @@ const V0_MAGIC: &[u8] = b"BEB";
 
 #[cfg(feature = "v0")]
 const V0_AES_GCM_256: u8 = 1;
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Encryption {
-    Undefined,
-    ChaCha20Poly1305,
-    AesGcm256,
-    Unknown,
-}
-
-impl From<u8> for Encryption {
-    fn from(value: u8) -> Self {
-        match value {
-            0 => Self::Undefined,
-            1 => Self::ChaCha20Poly1305,
-            _ => Self::Unknown,
-        }
-    }
-}
-
-impl From<Encryption> for u8 {
-    fn from(value: Encryption) -> Self {
-        match value {
-            Encryption::Undefined => 0x00,
-            Encryption::ChaCha20Poly1305 => 0x01,
-            Encryption::AesGcm256 => 0x01,
-            Encryption::Unknown => 0xFF,
-        }
-    }
-}
-
-impl Encryption {
-    pub fn is_defined(&self) -> bool {
-        match self {
-            Encryption::Undefined | Encryption::Unknown => false,
-            Encryption::AesGcm256 | Encryption::ChaCha20Poly1305 => true,
-        }
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Version {
-    V0,
-    V1,
-    Unknown,
-}
-
-impl From<Version> for u8 {
-    fn from(value: Version) -> Self {
-        match value {
-            Version::V0 => 0,
-            Version::V1 => 1,
-            Version::Unknown => 0xFF,
-        }
-    }
-}
-
-impl From<u8> for Version {
-    fn from(value: u8) -> Self {
-        match value {
-            0 => Self::V0,
-            1 => Self::V1,
-            _ => Self::Unknown,
-        }
-    }
-}
-
-impl Version {
-    fn max() -> Self {
-        Version::V1
-    }
-    pub fn is_valid(&self) -> bool {
-        match self {
-            Version::Unknown => false,
-            Version::V0 | Version::V1 => true,
-        }
-    }
-}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Error {
@@ -1525,22 +1540,21 @@ mod tests {
 
     #[test]
     fn test_single_sig_individual_secret_is_non_zero() {
-        use crate::miniscript::bitcoin::hashes::Hash;
         // Direct math check: with a single key, s and s_1 use different tags,
         // so their XOR cannot be all-zero in any practical sense.
+        let crypto = ll::crypto::RustBitcoin;
         let xonly = dpk_to_pk(&descriptor::tests::dpk_1())
             .unwrap()
             .x_only_public_key()
             .0
             .serialize();
 
-        let s = ll::decryption_secret(&[xonly]);
-        let s1 = ll::tagged_hash("BIP138_INDIVIDUAL_SECRET".as_bytes(), &xonly);
-        let c1 = ll::individual_secret(&s, &xonly);
+        let s = ll::decryption_secret(&crypto, &[xonly]);
+        let s1 = ll::tagged_hash(&crypto, "BIP138_INDIVIDUAL_SECRET".as_bytes(), &xonly);
+        let c1 = ll::individual_secret(&crypto, &s, &xonly);
 
         assert_ne!(
-            s.to_byte_array(),
-            s1.to_byte_array(),
+            s, s1,
             "decryption secret must differ from individual term for single-sig"
         );
         assert_ne!(

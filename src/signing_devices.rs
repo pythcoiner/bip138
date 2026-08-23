@@ -211,7 +211,7 @@ impl XpubCollector {
     }
 
     fn paths(&self, kind: DeviceKind) -> Vec<(DerivationPath, Expect)> {
-        let mut paths: BTreeMap<_, _> = crate::ll::common_derivation_paths(kind, self.network)
+        let mut paths: BTreeMap<_, _> = common_derivation_paths(kind, self.network)
             .into_iter()
             .collect();
 
@@ -334,14 +334,44 @@ where
 }
 
 fn fetch_path_expect(kind: DeviceKind, network: Network, path: &DerivationPath) -> Expect {
-    let common = crate::ll::common_derivation_paths(kind, network)
+    let common = common_derivation_paths(kind, network)
         .into_iter()
         .any(|(common_path, _)| common_path == *path);
     match (kind, common) {
         (DeviceKind::Ledger | DeviceKind::LedgerSimulator | DeviceKind::BitBox02, false) => {
             Expect::PromptUser
         }
-        _ => crate::ll::common_derivation_path_expect(kind, path),
+        _ => common_derivation_path_expect(kind, path),
+    }
+}
+
+/// Coin type used in the common derivation paths: 0 for mainnet, 1 otherwise.
+fn coin_type(network: Network) -> u32 {
+    match network {
+        Network::Bitcoin => 0,
+        _ => 1,
+    }
+}
+
+/// Common derivation paths a device is asked to expose, each tagged with how the
+/// flow should treat a failure to fetch it. The paths come from the `ll` core;
+/// the `Expect` classification is device-specific and lives here.
+fn common_derivation_paths(kind: DeviceKind, network: Network) -> Vec<(DerivationPath, Expect)> {
+    crate::ll::common_derivation_paths(coin_type(network))
+        .into_iter()
+        .map(|path| {
+            let path = crate::bitcoin_path(&path);
+            let expect = common_derivation_path_expect(kind, &path);
+            (path, expect)
+        })
+        .collect()
+}
+
+fn common_derivation_path_expect(kind: DeviceKind, path: &DerivationPath) -> Expect {
+    match (kind, path_purpose(path)) {
+        (DeviceKind::BitBox02, Some(44 | 87)) => Expect::CanFail,
+        (_, Some(87)) => Expect::CanFail,
+        _ => Expect::MustFetch,
     }
 }
 
@@ -382,7 +412,7 @@ where
 }
 
 fn bitbox_unlock_path(network: Network) -> DerivationPath {
-    crate::ll::common_derivation_paths(DeviceKind::BitBox02, network)
+    common_derivation_paths(DeviceKind::BitBox02, network)
         .into_iter()
         .map(|(path, _)| path)
         .find(|path| path_purpose(path) == Some(48))

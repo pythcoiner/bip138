@@ -5,7 +5,7 @@ use bip138::{
     Content, Encryption, Version,
     ll::{
         decode_v1, encode_derivation_paths, encode_encrypted_payload, encode_individual_secrets,
-        encode_v1, increment_offset, nonce, parse_content, parse_derivation_paths,
+        encode_v1, increment_offset, parse_content, parse_derivation_paths,
         parse_individual_secrets,
     },
 };
@@ -75,7 +75,7 @@ fuzz_target!(|bytes: &[u8]| {
         return;
     };
 
-    let payload = encode_encrypted_payload(nonce(), "0".as_bytes()).unwrap();
+    let payload = encode_encrypted_payload([1u8; 12], "0".as_bytes()).unwrap();
 
     let bytes = encode_v1(version.into(), deriv, secrets, encryption.into(), payload);
 
