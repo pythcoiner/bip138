@@ -141,6 +141,21 @@ Note: `rand` feature must be disabled for these target:
 cargo build --target wasm32-unknown-unknown --no-default-features --features "miniscript_latest"
 ```
 
+## C bindings
+
+The wire format and crypto orchestration live in a dependency-free core crate,
+[`bip138-ll`](bip138-ll/README.md). It keeps `secp256k1`, the cipher, the hash,
+and the RNG behind traits (public keys cross as raw 32-byte x-only keys), so a C
+or firmware consumer supplies its own crypto and never links this crate's
+dependencies. This `bip138` crate is the Rust front end: it depends on
+`bip138-ll` and fills in secp256k1, descriptor parsing, base64, the v0 fallback,
+and the CLI.
+
+Enable the core's `ffi` feature for a hand-written C binding (`bip138_encrypt` /
+`bip138_decrypt` over a crypto vtable). See
+[`bip138-ll/README.md`](bip138-ll/README.md) and
+[`bip138-ll/examples/consumer.c`](bip138-ll/examples/consumer.c).
+
 ## Features
 
 | Feature flag        | Default | Description                                           |
