@@ -1,0 +1,38 @@
+[package]
+name = "bip138-ll"
+version = "0.0.0"
+edition = "2024"
+rust-version = "1.88"
+readme = "README.md"
+description = "Dependency-free BIP138 wire format and crypto orchestration"
+license = "MIT"
+repository = "https://github.com/pythcoiner/bip138"
+documentation = "https://docs.rs/bip138-ll"
+publish = true
+
+[lib]
+path = "src/lib.rs"
+
+[dependencies]
+# The core is dependency-free. These back the optional `RustBitcoin`/`OsRandom`
+# providers only, so a caller that supplies its own primitives (the C consumer)
+# pulls none of them.
+bitcoin_hashes = { version = "0.14", default-features = false, optional = true }
+chacha20-poly1305 = { version = "0.1.2", default-features = false, features = ["alloc"], optional = true }
+rand = { version = "0.9", optional = true }
+
+[features]
+default = []
+# Bundled rust-bitcoin SHA-256 and ChaCha20-Poly1305 primitives.
+rust-bitcoin = ["dep:bitcoin_hashes", "dep:chacha20-poly1305"]
+# OS entropy source for nonces and decoys. Off by default so platforms without
+# an OS CSPRNG supply their own `Rng`.
+os-rng = ["dep:rand", "rust-bitcoin"]
+# C binding.
+ffi = []
+
+[dev-dependencies]
+hex = "0.4.3"
+rand = "0.9"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
