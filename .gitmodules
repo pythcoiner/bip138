@@ -1,6 +1,7 @@
 [submodule "fuzz/vendor/bip138-c"]
 	path = fuzz/vendor/bip138-c
-	url = https://github.com/odudex/bip138.git
+	url = https://github.com/ws-plaude/bip138-c.git
+	branch = defer-ciphertext-len
 [submodule "fuzz/vendor/bitcoin"]
 	path = fuzz/vendor/bitcoin
 	url = https://github.com/Sjors/bitcoin.git

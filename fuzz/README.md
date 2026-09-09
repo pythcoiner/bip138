@@ -16,7 +16,7 @@ real crypto-stack interop:
 | Arm  | Implementation | Crypto |
 |------|----------------|--------|
 | Rust | `bip138` / `bip138-ll` (this repo), called natively | `RustBitcoin` (bitcoin_hashes, chacha20-poly1305) |
-| C    | [odudex/bip138](https://github.com/odudex/bip138) (`vendor/bip138-c` submodule), via `cc` + `extern "C"` | mbedTLS PSA, the backend [Kern](https://github.com/odudex/Kern/pull/168) injects (`test/test_crypto.c`) |
+| C    | [ws-plaude/bip138-c](https://github.com/ws-plaude/bip138-c) (`vendor/bip138-c` submodule), our fork of [odudex/bip138](https://github.com/odudex/bip138), via `cc` + `extern "C"` | mbedTLS PSA, the backend [Kern](https://github.com/odudex/Kern/pull/168) injects (`test/test_crypto.c`) |
 | C++  | [Sjors/bitcoin#109](https://github.com/Sjors/bitcoin/pull/109) `wallet/encrypted_backup` (`vendor/bitcoin` submodule), via `cxx` | Bitcoin Core's own (`CSHA256`, `AEADChaCha20Poly1305`) |
 
 SHA-256 and ChaCha20-Poly1305 (IETF) are deterministic standards, so three correct
@@ -34,13 +34,15 @@ implementations must produce identical bytes; a mismatch is a bug.
   `CreateEncryptedBackup` draws its own randomness and parses a descriptor, so there
   is no deterministic low-level encode entry to drive.
 
-### Known normalizations
+### Convergence note
 
-The three parsers draw the parse-vs-interpret line for ciphertext length
-differently (Rust rejects an empty ciphertext, C rejects anything not longer than
-the 16-byte tag, C++ accepts either and fails at decrypt). The serialization is
-well framed in every case, so `diff_decode` skips inputs whose ciphertext is not a
-valid AEAD shape rather than flagging that layering difference.
+The three parsers once drew the parse-vs-interpret line for ciphertext length
+differently: C rejected any ciphertext not longer than the 16-byte AEAD tag, Rust
+rejected only an empty one, and C++ accepted either and failed at decrypt. The
+length is opaque framing (the AEAD gates it at decrypt), so this was a layering
+difference, not a framing divergence. Rust (`bip138-ll`) and the C fork now both
+defer that check to decrypt, matching C++, so `diff_decode` compares the full
+ciphertext-length range with no normalization.
 
 ## Building and running
 

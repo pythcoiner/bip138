@@ -202,31 +202,13 @@ fn cap(mut data: Vec<u8>) -> Vec<u8> {
 
 // --- Differential entry points ---
 
-/// C's `bip138_parse` folds two AEAD-interpretation checks into parsing: the
-/// ciphertext must be longer than the 16-byte Poly1305 tag, and its plaintext
-/// must fit the RFC 8439 limit. Rust's `decode_v1` treats the ciphertext as
-/// opaque length-delimited framing and defers both to decrypt. The framing is
-/// valid either way, so this is a layering choice, not a divergence.
-fn ciphertext_is_aead_shaped(len: usize) -> bool {
-    const MAX_PLAINTEXT: usize = (1 << 38) - 64;
-    len > 16 && len - 16 <= MAX_PLAINTEXT
-}
-
-/// Compare the three decoders (pure framing, no crypto) on raw bytes.
+/// Compare the three decoders (pure framing, no crypto) on raw bytes. All three
+/// treat the ciphertext as opaque length-delimited framing and defer the AEAD
+/// size check to decrypt, so no ciphertext-length normalization is needed.
 pub fn diff_decode(data: &[u8]) {
     let rust = rust_decode(data);
     let c = c_impl::decode(data);
     let cpp = cpp_impl::decode(data);
-    // The three parsers draw the parse-vs-interpret line for ciphertext length
-    // differently: Rust rejects an empty ciphertext, C rejects anything not longer
-    // than the tag, C++ accepts either and lets decrypt fail. These are known
-    // layering differences, not framing divergences, so skip any input where an
-    // accepting arm's ciphertext is not a valid AEAD shape.
-    for decoded in [&rust, &c, &cpp].into_iter().flatten() {
-        if !ciphertext_is_aead_shaped(decoded.ciphertext.len()) {
-            return;
-        }
-    }
     if rust != c || rust != cpp {
         panic!(
             "decode divergence:\n  rust={:?}\n  c={:?}\n  cpp={:?}",
