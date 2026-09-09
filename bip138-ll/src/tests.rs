@@ -503,10 +503,14 @@ fn test_encode_empty_encrypted_payload() {
 
 #[test]
 fn test_parse_zero_length_ciphertext() {
-    // A valid nonce followed by a zero LENGTH must be rejected at framing.
+    // A valid nonce followed by a zero LENGTH is well framed, so the parser
+    // accepts it; a ciphertext too short to hold the AEAD tag is rejected at
+    // decrypt, not at parse, keeping the parser encryption-agnostic.
     let mut bytes = [3u8; 12].to_vec();
     bytes.push(0x00);
-    assert_eq!(parse_encrypted_payload(&bytes), Err(Error::CypherTextEmpty));
+    let (nonce, cyphertext) = parse_encrypted_payload(&bytes).unwrap();
+    assert_eq!(nonce, [3u8; 12]);
+    assert!(cyphertext.is_empty());
 }
 
 #[test]

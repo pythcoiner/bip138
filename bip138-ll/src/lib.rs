@@ -1064,10 +1064,11 @@ pub fn parse_encrypted_payload(
     // <LENGTH>
     let (data_len, incr) = varint::parse(&bytes[offset..]).ok_or(Error::VarInt)?;
     let data_len = usize::try_from(data_len).map_err(|_| Error::DataLength)?;
-    if data_len == 0 {
-        return Err(Error::CypherTextEmpty);
-    }
-    offset = increment_offset(bytes, offset, incr)?;
+    // The ciphertext length is opaque framing: a zero-length or otherwise
+    // too-short ciphertext is rejected by the AEAD at decrypt, not here, so the
+    // parser stays agnostic to the encryption algorithm. Advance past the length
+    // without requiring a following byte, so a zero-length ciphertext is allowed.
+    offset = offset.checked_add(incr).ok_or(Error::OffsetOverflow)?;
     // <CYPHERTEXT>
     check_offset_lookahead(offset, bytes, data_len)?;
     let cyphertext = bytes[offset..offset + data_len].to_vec();
@@ -1107,9 +1108,7 @@ fn parse_encrypted_payload_length(bytes: &[u8], offset: usize) -> Result<(usize,
 
     let (data_len, incr) = varint::parse(&bytes[offset..]).ok_or(Error::VarInt)?;
     let data_len = usize::try_from(data_len).map_err(|_| Error::DataLength)?;
-    if data_len == 0 {
-        return Err(Error::CypherTextEmpty);
-    }
+    // Ciphertext length is opaque framing; the AEAD gates it at decrypt.
     let offset = offset.checked_add(incr).ok_or(Error::OffsetOverflow)?;
     let end = offset.checked_add(data_len).ok_or(Error::OffsetOverflow)?;
     if end > bytes.len() {
