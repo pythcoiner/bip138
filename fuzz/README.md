@@ -59,12 +59,16 @@ The C arm is built automatically by `build.rs`. The C++ arm links Bitcoin Core's
 static libraries, which you build once out of band:
 
 ```sh
-cmake -B fuzz/vendor/bitcoin/build -G Ninja \
+cmake -S fuzz/vendor/bitcoin -B fuzz/vendor/bitcoin/build -G Ninja \
       -DCMAKE_C_COMPILER=clang -DCMAKE_CXX_COMPILER=clang++ \
       -DCMAKE_BUILD_TYPE=Release -DENABLE_WALLET=ON \
       -DBUILD_TESTS=OFF -DBUILD_TX=OFF -DBUILD_UTIL=OFF -DBUILD_GUI=OFF \
       -DENABLE_IPC=OFF -DWITH_ZMQ=OFF -DBUILD_DAEMON=OFF -DBUILD_CLI=OFF
-ninja -C fuzz/vendor/bitcoin/build
+# Name the library targets: a bare `ninja` builds none of the static libs, since
+# they are only pulled in when an executable is linked.
+ninja -C fuzz/vendor/bitcoin/build \
+      bitcoin_wallet bitcoin_common bitcoin_consensus bitcoin_crypto \
+      bitcoin_util bitcoin_clientversion univalue secp256k1
 ```
 
 Then run a target (`build.rs` compiles the shim with `clang++` to match Core and
@@ -82,5 +86,5 @@ To keep tracking upstream, bump a submodule and rebuild:
 ```sh
 git -C fuzz/vendor/bitcoin fetch origin wip-encrypted-backup && \
   git -C fuzz/vendor/bitcoin checkout FETCH_HEAD && \
-  ninja -C fuzz/vendor/bitcoin/build
+  just fuzz-init
 ```

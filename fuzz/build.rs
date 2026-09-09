@@ -58,9 +58,8 @@ fn build_cpp_arm() {
     let core_build = core.join("build");
     if !core_build.join("lib/libbitcoin_wallet.a").exists() {
         panic!(
-            "vendor/bitcoin is not built; configure and build it first (see fuzz/README.md), \
-             e.g. `cmake -B vendor/bitcoin/build -G Ninja -DENABLE_WALLET=ON ...` then \
-             `ninja -C vendor/bitcoin/build`"
+            "vendor/bitcoin is not built; run `just fuzz-init` from the repo root \
+             (see fuzz/README.md for the manual cmake/ninja steps)"
         );
     }
 
