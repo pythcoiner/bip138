@@ -7,8 +7,15 @@ edition = "2024"
 [package.metadata]
 cargo-fuzz = true
 
+[lib]
+path = "src/lib.rs"
+
+[build-dependencies]
+cc = "1"
+
 [dependencies]
 libfuzzer-sys = "0.4"
+arbitrary = { version = "1", features = ["derive"] }
 
 [dependencies.bip138]
 path = ".."
@@ -44,6 +51,27 @@ bench = false
 [[bin]]
 name = "parse_encrypted_payload"
 path = "fuzz_targets/parse_encrypted_payload.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "diff_decode"
+path = "fuzz_targets/diff_decode.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "diff_decrypt"
+path = "fuzz_targets/diff_decrypt.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "diff_encode"
+path = "fuzz_targets/diff_encode.rs"
 test = false
 doc = false
 bench = false

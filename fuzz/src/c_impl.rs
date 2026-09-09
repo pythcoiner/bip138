@@ -1,0 +1,352 @@
+//! The C arm: odudex/bip138 (built from the `bip138-c` submodule) with its
+//! production crypto, mbedTLS via PSA (the reference callbacks in
+//! `test/test_crypto.c`, identical to Kern's `bip138_crypto.c`).
+
+use std::collections::BTreeSet;
+use std::os::raw::c_int;
+use std::ptr;
+use std::slice;
+
+use crate::Item;
+
+use crate::Decoded;
+
+pub const BIP138_OK: c_int = 0;
+
+#[repr(C)]
+struct Crypto {
+    _private: [u8; 0],
+}
+
+#[repr(C)]
+struct Container {
+    paths: *const u8,
+    paths_len: usize,
+    path_count: u8,
+    secrets: *const u8,
+    secret_count: u8,
+    nonce: *const u8,
+    ciphertext: *const u8,
+    ciphertext_len: usize,
+}
+
+#[repr(C)]
+struct Path {
+    child: *const u32,
+    depth: u8,
+}
+
+unsafe extern "C" {
+    fn test_crypto() -> *const Crypto;
+
+    fn bip138_parse(buf: *const u8, len: usize, out: *mut Container) -> c_int;
+
+    fn bip138_path_at(
+        c: *const Container,
+        index: usize,
+        child: *mut u32,
+        child_cap: usize,
+        depth: *mut usize,
+    ) -> c_int;
+
+    fn bip138_plaintext_max(c: *const Container) -> usize;
+
+    fn bip138_decrypt(
+        c: *const Crypto,
+        cont: *const Container,
+        keys: *const u8,
+        n_keys: usize,
+        plaintext: *mut u8,
+        plaintext_cap: usize,
+        plaintext_len: *mut usize,
+        key_index: *mut usize,
+    ) -> c_int;
+
+    fn bip138_secret_bucket(n_real: usize) -> usize;
+
+    fn bip138_path_is_common(path: *const Path) -> c_int;
+
+    fn bip138_item_iter_init(it: *mut ItemIter, plaintext: *const u8, len: usize);
+
+    fn bip138_item_next(it: *mut ItemIter, item: *mut CItem) -> c_int;
+
+    fn bip138_plaintext_encode(
+        items: *const CItem,
+        n_items: usize,
+        geometric_pad: c_int,
+        out: *mut u8,
+        out_cap: usize,
+        out_len: *mut usize,
+    ) -> c_int;
+
+    fn bip138_encrypt_ex(
+        c: *const Crypto,
+        keys: *const u8,
+        n_keys: usize,
+        paths: *const Path,
+        n_paths: usize,
+        nonce: *const u8,
+        decoys: *const u8,
+        n_decoys: usize,
+        plaintext: *const u8,
+        plaintext_len: usize,
+        out: *mut u8,
+        out_cap: usize,
+        out_len: *mut usize,
+    ) -> c_int;
+}
+
+#[repr(C)]
+struct CContent {
+    type_: u8,
+    bip: u16,
+    tag: *const u8,
+    tag_len: usize,
+}
+
+#[repr(C)]
+struct CItem {
+    content: CContent,
+    data: *const u8,
+    data_len: usize,
+}
+
+#[repr(C)]
+struct ItemIter {
+    buf: *const u8,
+    len: usize,
+    pos: usize,
+}
+
+/// Parse a container (pure framing, no crypto). `None` on any rejection.
+pub fn decode(bytes: &[u8]) -> Option<Decoded> {
+    unsafe {
+        let mut cont = Container {
+            paths: ptr::null(),
+            paths_len: 0,
+            path_count: 0,
+            secrets: ptr::null(),
+            secret_count: 0,
+            nonce: ptr::null(),
+            ciphertext: ptr::null(),
+            ciphertext_len: 0,
+        };
+        if bip138_parse(bytes.as_ptr(), bytes.len(), &mut cont) != BIP138_OK {
+            return None;
+        }
+
+        let secret_count = cont.secret_count as usize;
+        let secrets_bytes = slice::from_raw_parts(cont.secrets, secret_count * 32);
+        let secrets = (0..secret_count)
+            .map(|i| {
+                let mut s = [0u8; 32];
+                s.copy_from_slice(&secrets_bytes[i * 32..(i + 1) * 32]);
+                s
+            })
+            .collect::<BTreeSet<_>>();
+
+        let mut nonce = [0u8; 12];
+        nonce.copy_from_slice(slice::from_raw_parts(cont.nonce, 12));
+
+        let ciphertext = slice::from_raw_parts(cont.ciphertext, cont.ciphertext_len).to_vec();
+
+        let mut paths = BTreeSet::new();
+        for i in 0..cont.path_count as usize {
+            let mut child = [0u32; 256];
+            let mut depth = 0usize;
+            if bip138_path_at(&cont, i, child.as_mut_ptr(), child.len(), &mut depth) != BIP138_OK {
+                return None;
+            }
+            paths.insert(child[..depth].to_vec());
+        }
+
+        Some(Decoded {
+            paths,
+            secrets,
+            nonce,
+            ciphertext,
+        })
+    }
+}
+
+/// Decrypt a container with one x-only key. `Some(items)` on success.
+pub fn decrypt(bytes: &[u8], key: &[u8; 32]) -> Option<Vec<u8>> {
+    unsafe {
+        let mut cont = Container {
+            paths: ptr::null(),
+            paths_len: 0,
+            path_count: 0,
+            secrets: ptr::null(),
+            secret_count: 0,
+            nonce: ptr::null(),
+            ciphertext: ptr::null(),
+            ciphertext_len: 0,
+        };
+        if bip138_parse(bytes.as_ptr(), bytes.len(), &mut cont) != BIP138_OK {
+            return None;
+        }
+        let cap = bip138_plaintext_max(&cont);
+        let mut plaintext = vec![0u8; cap.max(1)];
+        let mut out_len = 0usize;
+        let rc = bip138_decrypt(
+            test_crypto(),
+            &cont,
+            key.as_ptr(),
+            1,
+            plaintext.as_mut_ptr(),
+            plaintext.len(),
+            &mut out_len,
+            ptr::null_mut(),
+        );
+        if rc != BIP138_OK {
+            return None;
+        }
+        plaintext.truncate(out_len);
+        Some(plaintext)
+    }
+}
+
+/// Deterministically encode a single content item to keys with an explicit nonce
+/// and explicit decoys. `content_type`/`bip`/`tag` describe the item; `data` is
+/// its plaintext; `paths` is the raw child-number lists. `None` on any failure.
+#[allow(clippy::too_many_arguments)]
+pub fn encode(
+    keys: &[[u8; 32]],
+    paths: &[Vec<u32>],
+    content_type: u8,
+    bip: u16,
+    tag: &[u8],
+    data: &[u8],
+    geometric_pad: bool,
+    nonce: &[u8; 12],
+    decoys: &[[u8; 32]],
+) -> Option<Vec<u8>> {
+    unsafe {
+        let item = CItem {
+            content: CContent {
+                type_: content_type,
+                bip,
+                tag: if tag.is_empty() { ptr::null() } else { tag.as_ptr() },
+                tag_len: tag.len(),
+            },
+            data: data.as_ptr(),
+            data_len: data.len(),
+        };
+        // Encode the plaintext payload (content metadata + item + padding).
+        let mut payload = vec![0u8; 1 << 20];
+        let mut payload_len = 0usize;
+        if bip138_plaintext_encode(
+            &item,
+            1,
+            geometric_pad as c_int,
+            payload.as_mut_ptr(),
+            payload.len(),
+            &mut payload_len,
+        ) != BIP138_OK
+        {
+            return None;
+        }
+        payload.truncate(payload_len);
+
+        let flat_keys: Vec<u8> = keys.iter().flatten().copied().collect();
+        let flat_decoys: Vec<u8> = decoys.iter().flatten().copied().collect();
+        let c_paths: Vec<Path> = paths
+            .iter()
+            .map(|p| Path {
+                child: p.as_ptr(),
+                depth: p.len() as u8,
+            })
+            .collect();
+
+        let mut out = vec![0u8; payload.len() + (1 << 16)];
+        let mut out_len = 0usize;
+        let rc = bip138_encrypt_ex(
+            test_crypto(),
+            flat_keys.as_ptr(),
+            keys.len(),
+            if c_paths.is_empty() {
+                ptr::null()
+            } else {
+                c_paths.as_ptr()
+            },
+            c_paths.len(),
+            nonce.as_ptr(),
+            if flat_decoys.is_empty() {
+                ptr::null()
+            } else {
+                flat_decoys.as_ptr()
+            },
+            decoys.len(),
+            payload.as_ptr(),
+            payload.len(),
+            out.as_mut_ptr(),
+            out.len(),
+            &mut out_len,
+        );
+        if rc != BIP138_OK {
+            return None;
+        }
+        out.truncate(out_len);
+        Some(out)
+    }
+}
+
+/// Decoy bucket for `n_real` recipients (5, 10, 20, ... 255).
+pub fn secret_bucket(n_real: usize) -> usize {
+    unsafe { bip138_secret_bucket(n_real) }
+}
+
+/// Whether a path is one of the 140 common paths both encoders drop.
+pub fn path_is_common(path: &[u32]) -> bool {
+    let p = Path {
+        child: path.as_ptr(),
+        depth: path.len() as u8,
+    };
+    unsafe { bip138_path_is_common(&p) != 0 }
+}
+
+/// Decrypt a container with one key and return the recovered content items.
+pub fn decrypt_items(bytes: &[u8], key: &[u8; 32]) -> Option<Vec<Item>> {
+    let payload = decrypt(bytes, key)?;
+    let mut items = Vec::new();
+    unsafe {
+        let mut it = ItemIter {
+            buf: ptr::null(),
+            len: 0,
+            pos: 0,
+        };
+        bip138_item_iter_init(&mut it, payload.as_ptr(), payload.len());
+        loop {
+            let mut item = CItem {
+                content: CContent {
+                    type_: 0,
+                    bip: 0,
+                    tag: ptr::null(),
+                    tag_len: 0,
+                },
+                data: ptr::null(),
+                data_len: 0,
+            };
+            let rc = bip138_item_next(&mut it, &mut item);
+            if rc < 0 {
+                return None;
+            }
+            if rc == 0 {
+                break;
+            }
+            let tag = if item.content.tag.is_null() {
+                Vec::new()
+            } else {
+                slice::from_raw_parts(item.content.tag, item.content.tag_len).to_vec()
+            };
+            let data = slice::from_raw_parts(item.data, item.data_len).to_vec();
+            items.push(Item {
+                kind: item.content.type_,
+                bip: item.content.bip,
+                tag,
+                data,
+            });
+        }
+    }
+    Some(items)
+}
