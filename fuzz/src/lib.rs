@@ -10,6 +10,7 @@ use std::collections::BTreeSet;
 use arbitrary::Arbitrary;
 
 pub mod c_impl;
+pub mod cpp_impl;
 
 use bip138::ll::{self, Content, DerivationPath, Padding, crypto::RustBitcoin};
 
@@ -30,16 +31,6 @@ pub struct Decoded {
     pub ciphertext: Vec<u8>,
 }
 
-/// One recovered content item, compared across arms after decryption.
-#[derive(Debug, PartialEq, Eq, PartialOrd, Ord)]
-pub struct Item {
-    /// Content discriminant: 1 BIP, 2 proprietary, 3 string, 0 other.
-    pub kind: u8,
-    pub bip: u16,
-    pub tag: Vec<u8>,
-    pub data: Vec<u8>,
-}
-
 // --- Rust arm (native) ---
 
 fn rust_decode(bytes: &[u8]) -> Option<Decoded> {
@@ -57,25 +48,11 @@ fn rust_decode(bytes: &[u8]) -> Option<Decoded> {
     })
 }
 
-fn rust_decrypt_items(bytes: &[u8], key: &[u8; 32]) -> Option<Vec<Item>> {
+fn rust_decrypt_data(bytes: &[u8], key: &[u8; 32]) -> Option<Vec<Vec<u8>>> {
     let (_paths, secrets, _enc, nonce, ciphertext) = ll::decode_v1(bytes).ok()?;
     let items = ll::decrypt_chacha20_poly1305_v1(&RustBitcoin, *key, &secrets, ciphertext, nonce)
         .ok()?;
-    Some(items.into_iter().map(|(c, data)| content_to_item(&c, data)).collect())
-}
-
-fn content_to_item(content: &Content, data: Vec<u8>) -> Item {
-    match content {
-        Content::Bip138 => Item { kind: 1, bip: 138, tag: vec![], data },
-        Content::Bip139 => Item { kind: 1, bip: 139, tag: vec![], data },
-        Content::Bip380 => Item { kind: 1, bip: 380, tag: vec![], data },
-        Content::Bip388 => Item { kind: 1, bip: 388, tag: vec![], data },
-        Content::Bip329 => Item { kind: 1, bip: 329, tag: vec![], data },
-        Content::BIP(n) => Item { kind: 1, bip: *n, tag: vec![], data },
-        Content::Proprietary(tag) => Item { kind: 2, bip: 0, tag: tag.clone(), data },
-        Content::String => Item { kind: 3, bip: 0, tag: vec![], data },
-        Content::None | Content::Unknown => Item { kind: 0, bip: 0, tag: vec![], data },
-    }
+    Some(items.into_iter().map(|(_content, data)| data).collect())
 }
 
 fn rust_encode(input: &Normalized) -> Option<Vec<u8>> {
@@ -235,24 +212,25 @@ fn ciphertext_is_aead_shaped(len: usize) -> bool {
     len > 16 && len - 16 <= MAX_PLAINTEXT
 }
 
-/// Compare the two decoders (pure framing, no crypto) on raw bytes.
+/// Compare the three decoders (pure framing, no crypto) on raw bytes.
 pub fn diff_decode(data: &[u8]) {
     let rust = rust_decode(data);
     let c = c_impl::decode(data);
-    // Skip the inputs C rejects only because it validates AEAD ciphertext shape
-    // at parse time while Rust validates it at decrypt.
-    if let (Some(d), None) = (&rust, &c)
-        && !ciphertext_is_aead_shaped(d.ciphertext.len())
-    {
-        return;
+    let cpp = cpp_impl::decode(data);
+    // The three parsers draw the parse-vs-interpret line for ciphertext length
+    // differently: Rust rejects an empty ciphertext, C rejects anything not longer
+    // than the tag, C++ accepts either and lets decrypt fail. These are known
+    // layering differences, not framing divergences, so skip any input where an
+    // accepting arm's ciphertext is not a valid AEAD shape.
+    for decoded in [&rust, &c, &cpp].into_iter().flatten() {
+        if !ciphertext_is_aead_shaped(decoded.ciphertext.len()) {
+            return;
+        }
     }
-    if rust != c {
+    if rust != c || rust != cpp {
         panic!(
-            "decode divergence: rust_accepts={} c_accepts={}\n  rust={:?}\n  c={:?}",
-            rust.is_some(),
-            c.is_some(),
-            rust,
-            c,
+            "decode divergence:\n  rust={:?}\n  c={:?}\n  cpp={:?}",
+            rust, c, cpp,
         );
     }
 }
@@ -285,8 +263,8 @@ pub fn diff_encode(input: EncodeInput) {
     }
 }
 
-/// Encode a valid container, then decrypt it in both arms and compare the
-/// recovered items (cross-implementation encrypt/decrypt interop).
+/// Encode a valid container, then decrypt it in every arm and compare the
+/// recovered item data (cross-implementation encrypt/decrypt interop).
 pub fn diff_decrypt(input: EncodeInput) {
     let Some(n) = normalize(input) else {
         return;
@@ -295,12 +273,13 @@ pub fn diff_decrypt(input: EncodeInput) {
         return;
     };
     let key = n.keys[0];
-    let rust = rust_decrypt_items(&blob, &key);
-    let c = c_impl::decrypt_items(&blob, &key);
-    if rust != c {
+    let rust = rust_decrypt_data(&blob, &key);
+    let c = c_impl::decrypt_data(&blob, &key);
+    let cpp = cpp_impl::decrypt_data(&blob, &key);
+    if rust != c || rust != cpp {
         panic!(
-            "decrypt divergence: rust={:?}\n  c={:?}",
-            rust, c,
+            "decrypt divergence:\n  rust={:?}\n  c={:?}\n  cpp={:?}",
+            rust, c, cpp,
         );
     }
 }

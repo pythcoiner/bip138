@@ -12,10 +12,12 @@ path = "src/lib.rs"
 
 [build-dependencies]
 cc = "1"
+cxx-build = "1"
 
 [dependencies]
 libfuzzer-sys = "0.4"
 arbitrary = { version = "1", features = ["derive"] }
+cxx = "1"
 
 [dependencies.bip138]
 path = ".."

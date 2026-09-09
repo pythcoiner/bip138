@@ -7,8 +7,6 @@ use std::os::raw::c_int;
 use std::ptr;
 use std::slice;
 
-use crate::Item;
-
 use crate::Decoded;
 
 pub const BIP138_OK: c_int = 0;
@@ -305,8 +303,8 @@ pub fn path_is_common(path: &[u32]) -> bool {
     unsafe { bip138_path_is_common(&p) != 0 }
 }
 
-/// Decrypt a container with one key and return the recovered content items.
-pub fn decrypt_items(bytes: &[u8], key: &[u8; 32]) -> Option<Vec<Item>> {
+/// Decrypt a container with one key and return the recovered item data.
+pub fn decrypt_data(bytes: &[u8], key: &[u8; 32]) -> Option<Vec<Vec<u8>>> {
     let payload = decrypt(bytes, key)?;
     let mut items = Vec::new();
     unsafe {
@@ -334,18 +332,7 @@ pub fn decrypt_items(bytes: &[u8], key: &[u8; 32]) -> Option<Vec<Item>> {
             if rc == 0 {
                 break;
             }
-            let tag = if item.content.tag.is_null() {
-                Vec::new()
-            } else {
-                slice::from_raw_parts(item.content.tag, item.content.tag_len).to_vec()
-            };
-            let data = slice::from_raw_parts(item.data, item.data_len).to_vec();
-            items.push(Item {
-                kind: item.content.type_,
-                bip: item.content.bip,
-                tag,
-                data,
-            });
+            items.push(slice::from_raw_parts(item.data, item.data_len).to_vec());
         }
     }
     Some(items)
