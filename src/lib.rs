@@ -67,6 +67,9 @@ pub enum Warning {
     DisallowedKeyExpression(DescriptorPublicKey),
     /// The expression resolves to the BIP341 NUMS point.
     NumsKey(DescriptorPublicKey),
+    /// A literal key or bare xpub in the payload puts this root on chain, so
+    /// it is dropped from the encryption-key set.
+    ExposedRoot(secp256k1::PublicKey),
 }
 
 /// Output of [`EncryptedBackup::encrypt`]: the encoded backup plus any
@@ -91,11 +94,18 @@ impl Encrypted {
 pub trait ToPayload {
     fn to_payload(&self) -> Result<Vec<u8>, Error>;
     fn content_type(&self) -> Content;
-    fn derivation_paths(&self) -> Result<Vec<DerivationPath>, Error>;
+    /// Origin derivation path of each encryption key, paired with that key so the
+    /// path goes when the key is dropped.
+    fn key_derivation_paths(&self) -> Result<Vec<(secp256k1::PublicKey, DerivationPath)>, Error>;
     fn keys(&self) -> Result<Vec<secp256k1::PublicKey>, Error>;
     /// Warnings about filtered key expressions. Default empty.
     fn warnings(&self) -> Result<Vec<Warning>, Error> {
         Ok(vec![])
+    }
+    /// x-only keys the item puts on chain as is (literal keys, bare xpub
+    /// roots). Default empty.
+    fn exposed_keys(&self) -> Vec<[u8; 32]> {
+        vec![]
     }
 }
 
@@ -106,7 +116,7 @@ impl ToPayload for Vec<u8> {
     fn content_type(&self) -> Content {
         Content::Unknown
     }
-    fn derivation_paths(&self) -> Result<Vec<DerivationPath>, Error> {
+    fn key_derivation_paths(&self) -> Result<Vec<(secp256k1::PublicKey, DerivationPath)>, Error> {
         Ok(vec![])
     }
     fn keys(&self) -> Result<Vec<secp256k1::PublicKey>, Error> {
@@ -121,7 +131,7 @@ impl ToPayload for String {
     fn content_type(&self) -> Content {
         Content::String
     }
-    fn derivation_paths(&self) -> Result<Vec<DerivationPath>, Error> {
+    fn key_derivation_paths(&self) -> Result<Vec<(secp256k1::PublicKey, DerivationPath)>, Error> {
         Ok(vec![])
     }
     fn keys(&self) -> Result<Vec<secp256k1::PublicKey>, Error> {
@@ -139,7 +149,7 @@ impl ToPayload for Bip138 {
     fn content_type(&self) -> Content {
         Content::Bip138
     }
-    fn derivation_paths(&self) -> Result<Vec<DerivationPath>, Error> {
+    fn key_derivation_paths(&self) -> Result<Vec<(secp256k1::PublicKey, DerivationPath)>, Error> {
         Ok(vec![])
     }
     fn keys(&self) -> Result<Vec<secp256k1::PublicKey>, Error> {
@@ -156,20 +166,22 @@ impl ToPayload for Descriptor<DescriptorPublicKey> {
         Content::Bip380
     }
 
-    fn derivation_paths(&self) -> Result<Vec<DerivationPath>, Error> {
-        let dpks = descr_to_dpks(self)?;
-        let (_, p) = descriptor::dpks_to_derivation_keys_paths(&dpks);
-        Ok(p)
+    fn key_derivation_paths(&self) -> Result<Vec<(secp256k1::PublicKey, DerivationPath)>, Error> {
+        Ok(descriptor::dpks_to_key_paths(&descr_to_dpks(self)))
     }
 
     fn keys(&self) -> Result<Vec<secp256k1::PublicKey>, Error> {
-        let dpks = descr_to_dpks(self)?;
+        let dpks = descr_to_dpks(self);
         let (k, _) = descriptor::dpks_to_derivation_keys_paths(&dpks);
         Ok(k)
     }
 
     fn warnings(&self) -> Result<Vec<Warning>, Error> {
         descriptor::descr_warnings(self)
+    }
+
+    fn exposed_keys(&self) -> Vec<[u8; 32]> {
+        descriptor::descr_exposed_keys(self)
     }
 }
 
@@ -330,6 +342,10 @@ pub struct EncryptedBackup {
     encryption: Encryption,
     derivation_paths: Vec<DerivationPath>,
     keys: Vec<secp256k1::PublicKey>,
+    // x-only keys the payload puts on chain, pooled across all its items
+    exposed_keys: Vec<[u8; 32]>,
+    // each payload key with its derivation path, to drop the path with the key
+    key_paths: Vec<(secp256k1::PublicKey, DerivationPath)>,
     payload: Payload,
     warnings: Vec<Warning>,
     padding: Padding,
@@ -343,6 +359,8 @@ impl Default for EncryptedBackup {
             encryption: Encryption::ChaCha20Poly1305,
             derivation_paths: vec![],
             keys: vec![],
+            exposed_keys: vec![],
+            key_paths: vec![],
             payload: Payload::None,
             warnings: vec![],
             padding: Padding::None,
@@ -371,6 +389,7 @@ impl EncryptedBackup {
     }
     pub fn set_keys(mut self, keys: Vec<secp256k1::PublicKey>) -> Self {
         self.keys = keys;
+        self.drop_exposed_keys();
         self
     }
     pub fn set_version(mut self, version: Version) -> Self {
@@ -403,10 +422,11 @@ impl EncryptedBackup {
         if payload.content_type().is_known() {
             self.content = payload.content_type();
         };
-        self.derivation_paths
-            .append(&mut payload.derivation_paths()?);
+        self.add_key_paths(payload.key_derivation_paths()?);
         self.keys.append(&mut payload.keys()?);
         self.warnings.append(&mut payload.warnings()?);
+        self.exposed_keys.append(&mut payload.exposed_keys());
+        self.drop_exposed_keys();
         Ok(self)
     }
     pub fn set_payloads(mut self, payloads: &[&dyn ToPayload]) -> Result<Self, Error> {
@@ -417,15 +437,46 @@ impl EncryptedBackup {
                 return Err(Error::UnknownContent);
             }
             encrypted_payloads.push((content, payload.to_payload()?));
-            self.derivation_paths
-                .append(&mut payload.derivation_paths()?);
+            self.add_key_paths(payload.key_derivation_paths()?);
             self.keys.append(&mut payload.keys()?);
             self.warnings.append(&mut payload.warnings()?);
+            self.exposed_keys.append(&mut payload.exposed_keys());
         }
+        self.drop_exposed_keys();
         self.payload = Payload::EncryptMany {
             payloads: encrypted_payloads,
         };
         Ok(self)
+    }
+    fn add_key_paths(&mut self, key_paths: Vec<(secp256k1::PublicKey, DerivationPath)>) {
+        self.derivation_paths
+            .extend(key_paths.iter().map(|(_, path)| path.clone()));
+        self.key_paths.extend(key_paths);
+    }
+    /// Drop every key, pooled or set by hand, whose x-coordinate the payload
+    /// puts on chain: one observed spend would reveal the encryption secret.
+    /// A derivation path goes with them unless a kept key also uses it: it only
+    /// helps a recipient that can decrypt.
+    fn drop_exposed_keys(&mut self) {
+        let exposed = &self.exposed_keys;
+        let warnings = &mut self.warnings;
+        self.keys.retain(|key| {
+            if !exposed.contains(&xonly_key(key)) {
+                return true;
+            }
+            let warning = Warning::ExposedRoot(*key);
+            if !warnings.contains(&warning) {
+                warnings.push(warning);
+            }
+            false
+        });
+        let (kept, dropped): (Vec<_>, Vec<_>) = self
+            .key_paths
+            .iter()
+            .partition(|(key, _)| !exposed.contains(&xonly_key(key)));
+        self.derivation_paths.retain(|path| {
+            kept.iter().any(|(_, p)| p == path) || !dropped.iter().any(|(_, p)| p == path)
+        });
     }
     pub fn get_warnings(&self) -> &[Warning] {
         &self.warnings
@@ -461,6 +512,10 @@ impl EncryptedBackup {
         match (self.encryption, self.version) {
             (Encryption::ChaCha20Poly1305, Version::V1) => {
                 let bytes = match &self.payload {
+                    // Only an empty pooled set refuses: a single item may have no key of its own.
+                    Payload::Encrypt { .. } | Payload::EncryptMany { .. } if keys.is_empty() => {
+                        return Err(Error::DescriptorHasNoKeys);
+                    }
                     Payload::Encrypt { payload } => {
                         #[cfg(feature = "rand")]
                         {
@@ -895,7 +950,9 @@ mod skip_unimplemented_tests {
         fn content_type(&self) -> Content {
             Content::Bip329
         }
-        fn derivation_paths(&self) -> Result<Vec<DerivationPath>, Error> {
+        fn key_derivation_paths(
+            &self,
+        ) -> Result<Vec<(secp256k1::PublicKey, DerivationPath)>, Error> {
             Ok(vec![])
         }
         fn keys(&self) -> Result<Vec<secp256k1::PublicKey>, Error> {
@@ -1638,8 +1695,8 @@ mod tests {
     // derivation OR a wildcard, and `Single` literal pubkeys are never valid.
     // The Rust impl enforces this in `descriptor::dpk_to_pk` and filters
     // invalid expressions in `descr_to_dpks` (each filtered expression
-    // surfaces as a Warning), returning `Error::DescriptorHasNoKeys` only
-    // when nothing valid remains.
+    // surfaces as a Warning); `encrypt` returns `Error::DescriptorHasNoKeys`
+    // only when nothing valid remains across the payload.
 
     #[test]
     fn test_reject_bare_xpub_descriptor() {
@@ -1649,7 +1706,11 @@ mod tests {
         let descr_str = "wpkh(tpubDEPBvXvhta3pjVaKokqC3eeMQnszj9ehFaA2zD5nSdkaccwGAizu8jVB2NeSpvmP2P52MBoZvNCixqXRJnTyXx51FQzARR63tjxQSyP3Btw)";
         let descriptor = Descriptor::<DescriptorPublicKey>::from_str(descr_str).unwrap();
 
-        let err = EncryptedBackup::new().set_payload(&descriptor).unwrap_err();
+        let err = EncryptedBackup::new()
+            .set_payload(&descriptor)
+            .unwrap()
+            .encrypt()
+            .unwrap_err();
         assert_eq!(err, Error::DescriptorHasNoKeys);
     }
 
@@ -1659,7 +1720,11 @@ mod tests {
         let descr_str = "pk(0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798)";
         let descriptor = Descriptor::<DescriptorPublicKey>::from_str(descr_str).unwrap();
 
-        let err = EncryptedBackup::new().set_payload(&descriptor).unwrap_err();
+        let err = EncryptedBackup::new()
+            .set_payload(&descriptor)
+            .unwrap()
+            .encrypt()
+            .unwrap_err();
         assert_eq!(err, Error::DescriptorHasNoKeys);
     }
 

@@ -174,14 +174,14 @@ impl ToPayload for PolicyBackup {
         Content::Bip388
     }
 
-    fn derivation_paths(&self) -> Result<Vec<DerivationPath>, Error> {
-        let mut paths = BTreeSet::new();
+    fn key_derivation_paths(&self) -> Result<Vec<(secp256k1::PublicKey, DerivationPath)>, Error> {
+        let mut key_paths = BTreeSet::new();
         for key in self.all_keys() {
             if let Some(path) = dpk_to_deriv_path(key) {
-                paths.insert(path);
+                key_paths.insert((key_root(key)?, path));
             }
         }
-        Ok(paths.into_iter().collect())
+        Ok(key_paths.into_iter().collect())
     }
 
     fn keys(&self) -> Result<Vec<secp256k1::PublicKey>, Error> {

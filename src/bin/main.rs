@@ -283,23 +283,6 @@ async fn main() -> Result<(), CliError> {
             let descriptor = Descriptor::<DescriptorPublicKey>::from_str(data.trim())
                 .map_err(CliError::CantConvertToDescriptor)?;
 
-            // Warn straight from the descriptor: excluding every key expression makes the
-            // backup refuse to build, and the user still has to be told what was dropped.
-            for w in bip138::descriptor::descr_warnings(&descriptor)
-                .map_err(CliError::FailedToEncrypt)?
-            {
-                match w {
-                    bip138::Warning::DisallowedKeyExpression(k) => {
-                        eprintln!(
-                            "warning: disallowed key expression excluded from encryption-key set: {k}; the cosigner holding this key cannot decrypt the backup with their key"
-                        );
-                    }
-                    bip138::Warning::NumsKey(k) => {
-                        eprintln!("warning: BIP341 NUMS key excluded from encryption-key set: {k}");
-                    }
-                }
-            }
-
             if !wrap_levels.is_empty() {
                 #[cfg(feature = "devices")]
                 if device.is_some() {
@@ -352,6 +335,7 @@ async fn main() -> Result<(), CliError> {
                 println!("using derivation path {path}");
             }
 
+            print_warnings(backup.get_warnings());
             let encrypted = backup.encrypt().map_err(CliError::FailedToEncrypt)?;
 
             // pass the byte vector to a file
@@ -872,13 +856,35 @@ fn encrypt_to_level_keys(
     if keys.is_empty() {
         return Err(CliError::NoKeys);
     }
-    EncryptedBackup::new()
+    let backup = EncryptedBackup::new()
         .set_payloads(payloads)
         .map_err(CliError::FailedToEncrypt)?
         .set_derivation_paths(paths)
-        .set_keys(keys)
-        .encrypt()
-        .map_err(CliError::FailedToEncrypt)
+        .set_keys(keys);
+    print_warnings(backup.get_warnings());
+    backup.encrypt().map_err(CliError::FailedToEncrypt)
+}
+
+// Printed before encrypting: an empty key set refuses to encode, and the user
+// still has to be told what was excluded.
+fn print_warnings(warnings: &[bip138::Warning]) {
+    for w in warnings {
+        match w {
+            bip138::Warning::DisallowedKeyExpression(k) => {
+                eprintln!(
+                    "warning: disallowed key expression excluded from encryption-key set: {k}; the cosigner holding this key cannot decrypt the backup with their key"
+                );
+            }
+            bip138::Warning::NumsKey(k) => {
+                eprintln!("warning: BIP341 NUMS key excluded from encryption-key set: {k}");
+            }
+            bip138::Warning::ExposedRoot(k) => {
+                eprintln!(
+                    "warning: key root exposed on chain by a literal key or bare xpub, excluded from encryption-key set: {k}; its holder cannot decrypt the backup with this key"
+                );
+            }
+        }
+    }
 }
 
 fn wrap_level_public_keys(level: &WrapLevel) -> Vec<PublicKey> {

@@ -8,9 +8,9 @@ use crate::miniscript::{
     descriptor::{DerivPaths, SinglePubKey, Wildcard},
 };
 
-/// Internal-only x-only normalization used by NUMS detection. Bypasses the
-/// allow/disallow check intentionally so a NUMS literal in tr() is reported
-/// as Warning::NumsKey rather than DisallowedKeyExpression.
+/// Internal-only x-only normalization used by NUMS and exposed key detection.
+/// Bypasses the allow/disallow check intentionally so a NUMS literal in tr()
+/// is reported as Warning::NumsKey rather than DisallowedKeyExpression.
 fn xonly_of(key: &DescriptorPublicKey) -> [u8; 32] {
     match key {
         DescriptorPublicKey::Single(k) => match k.key {
@@ -87,9 +87,9 @@ pub fn bip341_nums() -> bitcoin::secp256k1::PublicKey {
     .expect("Valid pubkey: NUMS from BIP341")
 }
 
-pub fn descr_to_dpks(
-    descriptor: &Descriptor<DescriptorPublicKey>,
-) -> Result<Vec<DescriptorPublicKey>, Error> {
+/// Key expressions allowed to encrypt. May be empty: the encoder refuses only
+/// when the key set pooled across the whole payload is empty.
+pub fn descr_to_dpks(descriptor: &Descriptor<DescriptorPublicKey>) -> Vec<DescriptorPublicKey> {
     let nums_xonly = bip341_nums().x_only_public_key().0;
     let mut keys = BTreeSet::new();
     descriptor.for_each_key(|k| {
@@ -101,13 +101,27 @@ pub fn descr_to_dpks(
         }
         true
     });
-    let keys: Vec<_> = keys.into_iter().collect();
+    keys.into_iter().collect()
+}
 
-    if keys.is_empty() {
-        Err(Error::DescriptorHasNoKeys)
-    } else {
-        Ok(keys)
-    }
+/// x-only keys a descriptor puts on chain as is: every literal key and every
+/// bare xpub root (no derivation, no wildcard).
+pub fn descr_exposed_keys(descriptor: &Descriptor<DescriptorPublicKey>) -> Vec<[u8; 32]> {
+    let mut keys = BTreeSet::new();
+    descriptor.for_each_key(|k| {
+        let exposed = match k {
+            DescriptorPublicKey::Single(_) => true,
+            DescriptorPublicKey::XPub(x) => {
+                x.derivation_path.is_empty() && x.wildcard == Wildcard::None
+            }
+            DescriptorPublicKey::MultiXPub(_) => false,
+        };
+        if exposed {
+            keys.insert(xonly_of(k));
+        }
+        true
+    });
+    keys.into_iter().collect()
 }
 
 /// Walk the descriptor and emit a warning for every key expression that
@@ -127,6 +141,20 @@ pub fn descr_warnings(descriptor: &Descriptor<DescriptorPublicKey>) -> Result<Ve
         true
     });
     Ok(warnings)
+}
+
+/// Root of each key expression allowed to encrypt, paired with its origin
+/// derivation path when it has one.
+pub fn dpks_to_key_paths(
+    dpks: &[DescriptorPublicKey],
+) -> Vec<(secp256k1::PublicKey, DerivationPath)> {
+    let mut key_paths = BTreeSet::new();
+    for k in dpks {
+        if let (Ok(key), Some(path)) = (dpk_to_pk(k), dpk_to_deriv_path(k)) {
+            key_paths.insert((key, path));
+        }
+    }
+    key_paths.into_iter().collect()
 }
 
 pub fn dpks_to_derivation_keys_paths(
@@ -386,7 +414,7 @@ pub mod tests {
 
     #[test]
     fn test_descript_to_dpk() {
-        let dpks = descr_to_dpks(&descr_1()).unwrap();
+        let dpks = descr_to_dpks(&descr_1());
         let expected = vec![dpk_1(), dpk_2()];
         assert_eq!(dpks, expected);
     }
@@ -396,7 +424,7 @@ pub mod tests {
         let descr_str = "tr(tpubD6NzVbkrYhZ4XWBqjZ7DTB4eFvi8eQZ79UvNbQFsxXiaMNaBn83jpMWTXLX2Gx6JgC5n9jWvx6vnijcAUgxXmRtFd4ntasRGNsYSCvQteSr/<0;1>/*,{and_v(v:and_v(v:pk([d4ab66f1/48'/1'/0'/2']tpubDEXYN145WM4rVKtcWpySBYiVQ229pmrnyAGJT14BBh2QJr7ABJswchDicZfFaauLyXhDad1nCoCZQEwAW87JPotP93ykC9WJvoASnBjYBxW/<2;3>/*),pk([79af2d8a/48'/1'/0'/2']tpubDEtHs6m9crfv1oeETj6EXteAtW7eoSSBVBaypEdWZt8VftbHF9R12xSZpzWGNuAofeGPL6cz48dLdCYbVioHL8ygA56yuPW76Xz5WZ3dt8o/<2;3>/*)),older(52596)),and_v(v:pk([d4ab66f1/48'/1'/0'/2']tpubDEXYN145WM4rVKtcWpySBYiVQ229pmrnyAGJT14BBh2QJr7ABJswchDicZfFaauLyXhDad1nCoCZQEwAW87JPotP93ykC9WJvoASnBjYBxW/<0;1>/*),pk([79af2d8a/48'/1'/0'/2']tpubDEtHs6m9crfv1oeETj6EXteAtW7eoSSBVBaypEdWZt8VftbHF9R12xSZpzWGNuAofeGPL6cz48dLdCYbVioHL8ygA56yuPW76Xz5WZ3dt8o/<0;1>/*))})#vudj49fm";
         let descriptor = Descriptor::<DescriptorPublicKey>::from_str(descr_str).unwrap();
         // unspendable keys must have been dropped
-        let keys = descr_to_dpks(&descriptor).unwrap();
+        let keys = descr_to_dpks(&descriptor);
         let nums_xonly = bip341_nums().x_only_public_key().0;
         for key in keys {
             let pk = dpk_to_pk(&key).unwrap();

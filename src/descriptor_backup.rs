@@ -11,7 +11,10 @@ use serde::{Deserialize, Serialize};
 
 use crate::{
     Content, Decrypted, Error, ToPayload, Warning,
-    descriptor::{descr_to_dpks, descr_warnings, dpks_to_derivation_keys_paths},
+    descriptor::{
+        descr_exposed_keys, descr_to_dpks, descr_warnings, dpks_to_derivation_keys_paths,
+        dpks_to_key_paths,
+    },
     miniscript::{
         Descriptor, DescriptorPublicKey,
         bitcoin::{bip32::DerivationPath, secp256k1},
@@ -93,20 +96,18 @@ impl ToPayload for DescriptorBackup {
         Content::Bip380
     }
 
-    fn derivation_paths(&self) -> Result<Vec<DerivationPath>, Error> {
-        let mut paths = BTreeSet::new();
+    fn key_derivation_paths(&self) -> Result<Vec<(secp256k1::PublicKey, DerivationPath)>, Error> {
+        let mut key_paths = BTreeSet::new();
         for descriptor in self.descriptors() {
-            let dpks = descr_to_dpks(descriptor)?;
-            let (_, p) = dpks_to_derivation_keys_paths(&dpks);
-            paths.extend(p);
+            key_paths.extend(dpks_to_key_paths(&descr_to_dpks(descriptor)));
         }
-        Ok(paths.into_iter().collect())
+        Ok(key_paths.into_iter().collect())
     }
 
     fn keys(&self) -> Result<Vec<secp256k1::PublicKey>, Error> {
         let mut keys = BTreeSet::new();
         for descriptor in self.descriptors() {
-            let dpks = descr_to_dpks(descriptor)?;
+            let dpks = descr_to_dpks(descriptor);
             let (k, _) = dpks_to_derivation_keys_paths(&dpks);
             keys.extend(k);
         }
@@ -123,6 +124,14 @@ impl ToPayload for DescriptorBackup {
             }
         }
         Ok(warnings)
+    }
+
+    fn exposed_keys(&self) -> Vec<[u8; 32]> {
+        let mut keys = BTreeSet::new();
+        for descriptor in self.descriptors() {
+            keys.extend(descr_exposed_keys(descriptor));
+        }
+        keys.into_iter().collect()
     }
 }
 
@@ -269,5 +278,128 @@ mod tests {
                 );
             }
         }
+    }
+}
+
+#[cfg(all(test, feature = "rand"))]
+mod exposed_roots {
+    use alloc::{format, vec, vec::Vec};
+    use core::str::FromStr;
+
+    use crate::{
+        EncryptedBackup, Error, Warning,
+        descriptor_backup::{DescriptorBackup, DescriptorSet},
+        miniscript::{
+            Descriptor, DescriptorPublicKey,
+            bitcoin::{bip32::DerivationPath, secp256k1},
+        },
+    };
+
+    const X: &str = "tpubDEPBvXvhta3pjVaKokqC3eeMQnszj9ehFaA2zD5nSdkaccwGAizu8jVB2NeSpvmP2P52MBoZvNCixqXRJnTyXx51FQzARR63tjxQSyP3Btw";
+    // root pubkey of X
+    const X_ROOT: &str = "03ebd252ca0877aae09b9d058219682775aa3cbcd049c12f07832f2cf6a3b51708";
+
+    fn backup(descriptors: &[&str]) -> DescriptorBackup {
+        DescriptorBackup {
+            version: 1,
+            descriptor_sets: descriptors
+                .iter()
+                .map(|d| DescriptorSet {
+                    descriptor: Descriptor::from_str(d).unwrap(),
+                    change_descriptor: None,
+                    archived: false,
+                    range: None,
+                    birth_time: None,
+                })
+                .collect::<Vec<_>>(),
+        }
+    }
+
+    fn dpk(s: &str) -> DescriptorPublicKey {
+        DescriptorPublicKey::from_str(s).unwrap()
+    }
+
+    fn x_root() -> secp256k1::PublicKey {
+        secp256k1::PublicKey::from_str(X_ROOT).unwrap()
+    }
+
+    #[test]
+    fn root_used_bare_and_derived_refuses() {
+        let backup = backup(&[&format!("wsh(or_i(pk({X}/0/*),pk({X})))")]);
+        let encrypted = EncryptedBackup::new().set_payload(&backup).unwrap();
+        assert!(encrypted.get_keys().is_empty());
+        assert_eq!(
+            encrypted.get_warnings(),
+            [
+                Warning::DisallowedKeyExpression(dpk(X)),
+                Warning::ExposedRoot(x_root())
+            ]
+        );
+        assert_eq!(encrypted.encrypt().unwrap_err(), Error::DescriptorHasNoKeys);
+    }
+
+    #[test]
+    fn root_exposed_by_literal_in_other_set_refuses() {
+        // the literal has the opposite parity of X's root, only the x-coordinate matters
+        let literal = "02ebd252ca0877aae09b9d058219682775aa3cbcd049c12f07832f2cf6a3b51708";
+        let backup = backup(&[&format!("tr({X}/*)"), &format!("wpkh({literal})")]);
+        let encrypted = EncryptedBackup::new().set_payload(&backup).unwrap();
+        assert!(encrypted.get_keys().is_empty());
+        assert_eq!(
+            encrypted.get_warnings(),
+            [
+                Warning::DisallowedKeyExpression(dpk(literal)),
+                Warning::ExposedRoot(x_root())
+            ]
+        );
+        assert_eq!(encrypted.encrypt().unwrap_err(), Error::DescriptorHasNoKeys);
+    }
+
+    #[test]
+    fn key_set_by_hand_is_excluded_too() {
+        let literal = "02ebd252ca0877aae09b9d058219682775aa3cbcd049c12f07832f2cf6a3b51708";
+        let backup = backup(&[&format!("wpkh({literal})")]);
+        let encrypted = EncryptedBackup::new()
+            .set_payload(&backup)
+            .unwrap()
+            .set_keys(vec![x_root()]);
+        assert!(encrypted.get_keys().is_empty());
+        assert_eq!(
+            encrypted.get_warnings(),
+            [
+                Warning::DisallowedKeyExpression(dpk(literal)),
+                Warning::ExposedRoot(x_root())
+            ]
+        );
+        assert_eq!(encrypted.encrypt().unwrap_err(), Error::DescriptorHasNoKeys);
+    }
+
+    #[test]
+    fn set_with_no_eligible_key_does_not_refuse() {
+        let literal = "0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798";
+        let backup = backup(&[&format!("tr({X}/*)"), &format!("wpkh({literal})")]);
+        let encrypted = EncryptedBackup::new().set_payload(&backup).unwrap();
+        assert_eq!(encrypted.get_keys(), vec![x_root()]);
+        assert_eq!(
+            encrypted.get_warnings(),
+            [Warning::DisallowedKeyExpression(dpk(literal))]
+        );
+        encrypted.encrypt().unwrap();
+    }
+
+    #[test]
+    fn exposed_root_takes_its_derivation_path() {
+        let y = "tpubDC5FSnBiZDMmhiuCmWAYsLwgLYrrT9rAqvTySfuCCrgsWz8wxMXUS9Tb9iVMvcRbvFcAHGkMD5Kx8koh4GquNGNTfohfk7pgjhaPCdXpoba";
+        let literal = "02ebd252ca0877aae09b9d058219682775aa3cbcd049c12f07832f2cf6a3b51708";
+        let backup = backup(&[
+            &format!("wsh(multi(1,[58b7f8dc/48h/1h/0h/2h]{X}/*,[d34db33f/84h/1h/0h]{y}/*))"),
+            &format!("wpkh({literal})"),
+        ]);
+        let encrypted = EncryptedBackup::new().set_payload(&backup).unwrap();
+        assert_eq!(encrypted.get_keys().len(), 1);
+        assert_eq!(
+            encrypted.get_derivation_paths(),
+            vec![DerivationPath::from_str("84h/1h/0h").unwrap()]
+        );
     }
 }
