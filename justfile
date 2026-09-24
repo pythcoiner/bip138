@@ -5,10 +5,12 @@ ci:
     ./contrib/build.sh
     ./contrib/build-wasm.sh
 
-# Remove all build artifacts, for the crate and the fuzz workspace.
+# Remove all build artifacts, for the crate and the fuzz workspace, and wipe the
+# vendored impls (checkouts and the Bitcoin Core build); `just fuzz-init` restores them.
 clean:
     cargo clean
     cargo clean --manifest-path fuzz/Cargo.toml
+    git submodule deinit --force fuzz/vendor/bip138-c fuzz/vendor/bitcoin
 
 # Fetch the vendored impls and build Bitcoin Core for the differential fuzzers.
 # Run once, and again after bumping a submodule.
