@@ -77,3 +77,10 @@ path = "fuzz_targets/diff_encode.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "diff_plaintext"
+path = "fuzz_targets/diff_plaintext.rs"
+test = false
+doc = false
+bench = false

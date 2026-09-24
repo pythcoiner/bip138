@@ -12,7 +12,7 @@ use arbitrary::Arbitrary;
 pub mod c_impl;
 pub mod cpp_impl;
 
-use bip138::ll::{self, Content, DerivationPath, Padding, crypto::RustBitcoin};
+use bip138::ll::{self, Content, DerivationPath, Encryption, Padding, Version, crypto::RustBitcoin};
 
 /// x-only BIP341 NUMS point, dropped from the key set by both encoders. Feeding
 /// it would make the arms diverge on how many real keys remain, so the encode
@@ -21,6 +21,10 @@ const NUMS_XONLY: [u8; 32] = [
     0x50, 0x92, 0x9b, 0x74, 0xc1, 0xa0, 0x49, 0x54, 0xb7, 0x8b, 0x4b, 0x60, 0x35, 0xe9, 0x7a, 0x5e,
     0x07, 0x8a, 0x5a, 0x0f, 0x28, 0xec, 0x96, 0xd5, 0x47, 0xbf, 0xee, 0x9a, 0xce, 0x80, 0x3a, 0xc0,
 ];
+
+/// Fixed recipient and nonce `diff_plaintext` wraps its plaintext with.
+const PLAINTEXT_KEY: [u8; 32] = [0x02; 32];
+const PLAINTEXT_NONCE: [u8; 12] = [0x01; 12];
 
 /// Normalized decode result, compared field-by-field across arms. Paths and
 /// secrets keep each arm's parse order; compare them through `canonical`.
@@ -110,6 +114,24 @@ fn rust_decrypt_items(bytes: &[u8], key: &[u8; 32]) -> Option<Vec<Item>> {
             .filter(|(ctype, _)| *ctype != ContentType::Unknown)
             .collect(),
     )
+}
+
+/// Wrap `plaintext` byte-exact as the payload of a container for
+/// `PLAINTEXT_KEY`, with no paths and no decoys. `None` for an empty plaintext,
+/// which cannot be encrypted.
+fn rust_wrap_plaintext(plaintext: &[u8]) -> Option<Vec<u8>> {
+    let keys = [PLAINTEXT_KEY];
+    let secret = ll::decryption_secret(&RustBitcoin, &keys);
+    let secrets = ll::individual_secrets(&RustBitcoin, &secret, &keys);
+    let (nonce, ciphertext) =
+        ll::encrypt_with_nonce(&RustBitcoin, secret, plaintext.to_vec(), PLAINTEXT_NONCE).ok()?;
+    Some(ll::encode_v1(
+        Version::V1.into(),
+        ll::encode_derivation_paths(Vec::new()).ok()?,
+        ll::encode_individual_secrets(&secrets).ok()?,
+        Encryption::ChaCha20Poly1305.into(),
+        ll::encode_encrypted_payload(nonce, &ciphertext).ok()?,
+    ))
 }
 
 /// The data of each item, for the C++ arm which reports no content types.
@@ -353,9 +375,7 @@ pub fn diff_encode(input: EncodeInput) {
 }
 
 /// Encode a valid container, then decrypt it in every arm and compare the
-/// recovered items (cross-implementation encrypt/decrypt interop). C++'s
-/// `DecryptBackupContentsWithKey` returns only each item's data and its payload
-/// walker is private, so content types are compared between Rust and C only.
+/// recovered items (cross-implementation encrypt/decrypt interop).
 pub fn diff_decrypt(input: EncodeInput) {
     let Some(n) = normalize(input) else {
         return;
@@ -363,11 +383,49 @@ pub fn diff_decrypt(input: EncodeInput) {
     let Some(blob) = rust_encode(&n) else {
         return;
     };
-    let key = n.keys[0];
-    let rust = rust_decrypt_items(&blob, &key);
-    let c = c_impl::decrypt_items(&blob, &key);
-    let cpp = cpp_impl::decrypt_data(&blob, &key);
-    if rust != c || rust.as_deref().map(item_data) != cpp {
+    compare_decrypt(&blob, &n.keys[0]);
+}
+
+/// Wrap arbitrary bytes as the plaintext of a valid container, then decrypt it in
+/// every arm and compare accept/reject and the recovered items. Covers malformed
+/// payloads the encoders never produce.
+pub fn diff_plaintext(plaintext: &[u8]) {
+    let Some(blob) = rust_wrap_plaintext(plaintext) else {
+        return;
+    };
+    compare_decrypt(&blob, &PLAINTEXT_KEY);
+}
+
+/// Decrypt `blob` with `key` in every arm and compare the recovered items. C++'s
+/// `DecryptBackupContentsWithKey` returns only each item's data and its payload
+/// walker is private, so content types are compared between Rust and C only.
+fn compare_decrypt(blob: &[u8], key: &[u8; 32]) {
+    let rust = rust_decrypt_items(blob, key);
+    let c = c_impl::decrypt_items(blob, key);
+    let cpp = cpp_impl::decrypt_data(blob, key);
+    // Rust's `decode_plaintext` only frames the items: bip138's `extract` checks
+    // that a string item is UTF-8. C and C++ check it while walking the payload
+    // and reject the whole payload.
+    let bad_utf8 = rust.as_ref().is_some_and(|items| {
+        items
+            .iter()
+            .any(|(ty, data)| *ty == ContentType::String && core::str::from_utf8(data).is_err())
+    });
+    // C++ is Bitcoin Core's wallet code, not a library: it rejects a payload with
+    // no known item, as the wallet has nothing to import. Rust and C return an
+    // empty list and leave that call to the caller.
+    let cpp_agrees = (bad_utf8 && cpp.is_none())
+        || match rust.as_deref() {
+            Some([]) => matches!(cpp.as_deref(), None | Some([])),
+            rust => rust.map(item_data) == cpp,
+        };
+    // C's contract rejects the whole payload when a known item has empty content;
+    // Rust and C++ return the item with empty data.
+    let has_empty = rust
+        .as_ref()
+        .is_some_and(|items| items.iter().any(|(_, data)| data.is_empty()));
+    let c_agrees = rust == c || ((has_empty || bad_utf8) && c.is_none());
+    if !c_agrees || !cpp_agrees {
         panic!(
             "decrypt divergence:\n  rust={:?}\n  c={:?}\n  cpp={:?}",
             rust, c, cpp,

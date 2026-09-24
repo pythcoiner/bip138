@@ -4,9 +4,9 @@ Two kinds of targets live here:
 
 - The original single-implementation parser fuzzers (`decode`, `encode`,
   `parse_deriv_paths`, `parse_individual_secrets`, `parse_encrypted_payload`).
-- **Differential fuzzers** (`diff_decode`, `diff_decrypt`, `diff_encode`) that run
-  the same input through three independent BIP138 implementations and flag any
-  divergence.
+- **Differential fuzzers** (`diff_decode`, `diff_decrypt`, `diff_encode`,
+  `diff_plaintext`) that run the same input through three independent BIP138
+  implementations and flag any divergence.
 
 ## The three arms
 
@@ -33,6 +33,9 @@ implementations must produce identical bytes; a mismatch is a bug.
   explicit nonce and decoys, compare the container byte-for-byte. The C++ arm is
   not byte-compared: `CreateEncryptedBackup` draws its own randomness and parses a
   descriptor, so there is no deterministic low-level encode entry to drive.
+- **`diff_plaintext`** (3-way): wrap raw bytes as the plaintext of a valid
+  container (fixed key and nonce), decrypt it in every arm, compare accept/reject
+  and the recovered items. Covers malformed payloads the encoders never produce.
 
 ### Convergence note
 
@@ -79,6 +82,7 @@ link memory down):
 cargo +nightly fuzz run diff_decode  -- -max_total_time=60
 cargo +nightly fuzz run diff_decrypt -- -max_total_time=60
 cargo +nightly fuzz run diff_encode  -- -max_total_time=60
+cargo +nightly fuzz run diff_plaintext -- -max_total_time=60
 ```
 
 To keep tracking upstream, bump a submodule and rebuild:
