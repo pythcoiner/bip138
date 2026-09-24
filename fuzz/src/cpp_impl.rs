@@ -3,8 +3,6 @@
 //! AEADChaCha20Poly1305). Bound through a `cxx` shim over its decode and
 //! decrypt entry points.
 
-use std::collections::BTreeSet;
-
 use crate::Decoded;
 
 #[cxx::bridge(namespace = "bip138shim")]
@@ -56,10 +54,10 @@ pub fn decode(bytes: &[u8]) -> Option<Decoded> {
             s.copy_from_slice(c);
             s
         })
-        .collect::<BTreeSet<_>>();
+        .collect::<Vec<_>>();
     let mut nonce = [0u8; 12];
     nonce.copy_from_slice(&d.nonce);
-    let paths = d.paths.into_iter().map(|p| p.child).collect::<BTreeSet<_>>();
+    let paths = d.paths.into_iter().map(|p| p.child).collect::<Vec<_>>();
     Some(Decoded {
         paths,
         secrets,

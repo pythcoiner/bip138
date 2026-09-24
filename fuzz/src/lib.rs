@@ -22,14 +22,48 @@ const NUMS_XONLY: [u8; 32] = [
     0x07, 0x8a, 0x5a, 0x0f, 0x28, 0xec, 0x96, 0xd5, 0x47, 0xbf, 0xee, 0x9a, 0xce, 0x80, 0x3a, 0xc0,
 ];
 
-/// Normalized decode result, compared field-by-field across arms.
+/// Normalized decode result, compared field-by-field across arms. Paths and
+/// secrets keep each arm's parse order; compare them through `canonical`.
 #[derive(Debug, PartialEq, Eq)]
 pub struct Decoded {
-    pub paths: BTreeSet<Vec<u32>>,
-    pub secrets: BTreeSet<[u8; 32]>,
+    pub paths: Vec<Vec<u32>>,
+    pub secrets: Vec<[u8; 32]>,
     pub nonce: [u8; 12],
     pub ciphertext: Vec<u8>,
 }
+
+impl Decoded {
+    /// Sort and dedup paths and secrets. Rust's parser returns them sorted and
+    /// deduplicated, C and C++ in wire order. BIP138 allows dedup at parse and
+    /// the order carries no meaning; what matters is that every encoder sorts,
+    /// which the encode targets check byte-for-byte.
+    fn canonical(self) -> Self {
+        Self {
+            paths: sorted_unique(self.paths),
+            secrets: sorted_unique(self.secrets),
+            ..self
+        }
+    }
+}
+
+fn sorted_unique<T: Ord>(mut v: Vec<T>) -> Vec<T> {
+    v.sort();
+    v.dedup();
+    v
+}
+
+/// A content type as the arms report it. An unknown type keeps neither its TYPE
+/// byte nor its params, as Rust's `Content::Unknown` carries neither.
+#[derive(Debug, PartialEq, Eq)]
+pub enum ContentType {
+    Bip(u16),
+    Proprietary(Vec<u8>),
+    String,
+    Unknown,
+}
+
+/// A recovered plaintext item: its content type and data.
+pub type Item = (ContentType, Vec<u8>);
 
 // --- Rust arm (native) ---
 
@@ -48,11 +82,39 @@ fn rust_decode(bytes: &[u8]) -> Option<Decoded> {
     })
 }
 
-fn rust_decrypt_data(bytes: &[u8], key: &[u8; 32]) -> Option<Vec<Vec<u8>>> {
+fn rust_content_type(content: Content) -> ContentType {
+    match content {
+        Content::Bip138 => ContentType::Bip(138),
+        Content::Bip139 => ContentType::Bip(139),
+        Content::Bip380 => ContentType::Bip(380),
+        Content::Bip388 => ContentType::Bip(388),
+        Content::Bip329 => ContentType::Bip(329),
+        Content::BIP(n) => ContentType::Bip(n),
+        Content::Proprietary(tag) => ContentType::Proprietary(tag),
+        Content::String => ContentType::String,
+        Content::Unknown => ContentType::Unknown,
+        Content::None => unreachable!("the parser never yields Content::None"),
+    }
+}
+
+fn rust_decrypt_items(bytes: &[u8], key: &[u8; 32]) -> Option<Vec<Item>> {
     let (_paths, secrets, _enc, nonce, ciphertext) = ll::decode_v1(bytes).ok()?;
     let items = ll::decrypt_chacha20_poly1305_v1(&RustBitcoin, *key, &secrets, ciphertext, nonce)
         .ok()?;
-    Some(items.into_iter().map(|(_content, data)| data).collect())
+    // C and C++ step over unknown items without reporting them, Rust returns them
+    // as `Content::Unknown`; the spec only asks decoders to skip them, so drop them.
+    Some(
+        items
+            .into_iter()
+            .map(|(content, data)| (rust_content_type(content), data))
+            .filter(|(ctype, _)| *ctype != ContentType::Unknown)
+            .collect(),
+    )
+}
+
+/// The data of each item, for the C++ arm which reports no content types.
+fn item_data(items: &[Item]) -> Vec<Vec<u8>> {
+    items.iter().map(|(_ctype, data)| data.clone()).collect()
 }
 
 fn rust_encode(input: &Normalized) -> Option<Vec<u8>> {
@@ -61,7 +123,11 @@ fn rust_encode(input: &Normalized) -> Option<Vec<u8>> {
         .iter()
         .map(|p| DerivationPath::from(p.clone()))
         .collect();
-    let items = [(input.content.clone(), input.data.as_slice())];
+    let items: Vec<(Content, &[u8])> = input
+        .items
+        .iter()
+        .map(|item| (item.content.content.clone(), item.data.as_slice()))
+        .collect();
     let padding = if input.geometric_pad {
         Padding::Geometric
     } else {
@@ -88,29 +154,88 @@ enum ContentChoice {
     Str(String),
 }
 
+#[derive(Arbitrary, Debug)]
+struct ItemChoice {
+    content: ContentChoice,
+    data: Vec<u8>,
+}
+
 /// Raw structured input the fuzzer mutates.
 #[derive(Arbitrary, Debug)]
 pub struct EncodeInput {
     keys: Vec<[u8; 32]>,
     paths: Vec<Vec<u32>>,
-    content: ContentChoice,
-    data: Vec<u8>,
+    items: Vec<ItemChoice>,
     nonce: [u8; 12],
     geometric_pad: bool,
     decoy_seed: u64,
 }
 
-/// Input after canonicalization: distinct non-NUMS keys, non-common non-empty
-/// paths, a non-zero nonce, non-empty data, and exactly the bucket's worth of
-/// distinct non-zero decoys, so both encoders take the same path.
+/// A content type and its C representation.
+pub(crate) struct EncodeContent {
+    content: Content,
+    pub(crate) ctype: u8,
+    pub(crate) bip: u16,
+    pub(crate) tag: Vec<u8>,
+}
+
+impl From<ContentChoice> for EncodeContent {
+    fn from(content: ContentChoice) -> Self {
+        match content {
+            ContentChoice::Bip(n) => EncodeContent {
+                content: Content::BIP(n),
+                ctype: c_impl::BIP138_CONTENT_BIP,
+                bip: n,
+                tag: Vec::new(),
+            },
+            ContentChoice::Proprietary(mut tag) => {
+                tag.truncate(64);
+                EncodeContent {
+                    content: Content::Proprietary(tag.clone()),
+                    ctype: c_impl::BIP138_CONTENT_PROPRIETARY,
+                    bip: 0,
+                    tag,
+                }
+            }
+            ContentChoice::Str(_) => EncodeContent {
+                content: Content::String,
+                ctype: c_impl::BIP138_CONTENT_STRING,
+                bip: 0,
+                tag: Vec::new(),
+            },
+        }
+    }
+}
+
+/// One content item and its C representation.
+pub(crate) struct EncodeItem {
+    pub(crate) content: EncodeContent,
+    pub(crate) data: Vec<u8>,
+}
+
+impl From<ItemChoice> for EncodeItem {
+    fn from(item: ItemChoice) -> Self {
+        // A string item carries its text as data.
+        let data = match &item.content {
+            ContentChoice::Str(s) => cap(s.clone().into_bytes()),
+            _ => cap(item.data),
+        };
+        EncodeItem {
+            content: EncodeContent::from(item.content),
+            data,
+        }
+    }
+}
+
+/// Input after canonicalization: distinct non-NUMS keys, a non-zero nonce, and
+/// exactly the bucket's worth of distinct non-zero decoys, so both encoders take
+/// the same path. Paths and items are passed through as-is, so both encoders'
+/// drop (common paths) and reject (empty path, empty item list or data) logic is
+/// compared.
 struct Normalized {
     keys: Vec<[u8; 32]>,
     paths: Vec<Vec<u32>>,
-    content: Content,
-    ctype: u8,
-    bip: u16,
-    tag: Vec<u8>,
-    data: Vec<u8>,
+    items: Vec<EncodeItem>,
     nonce: [u8; 12],
     geometric_pad: bool,
     decoys: Vec<[u8; 32]>,
@@ -129,31 +254,20 @@ fn normalize(input: EncodeInput) -> Option<Normalized> {
         return None;
     }
 
-    // Non-empty, non-common paths (dropping common paths is a separate concern;
-    // keeping only non-common paths means neither encoder drops any).
+    // The C binding carries a path depth as a u8, so longer paths cannot cross it.
     let paths: Vec<Vec<u32>> = input
         .paths
         .into_iter()
-        .filter(|p| !p.is_empty() && p.len() <= 255)
-        .filter(|p| !c_impl::path_is_common(p))
+        .filter(|p| p.len() <= 255)
         .take(16)
         .collect();
 
-    // Content and its C representation.
-    let (content, ctype, bip, tag, data) = match input.content {
-        ContentChoice::Bip(n) => (Content::BIP(n), 1u8, n, Vec::new(), cap(input.data)),
-        ContentChoice::Proprietary(t) => {
-            let tag = { let mut t = t; t.truncate(64); t };
-            (Content::Proprietary(tag.clone()), 2u8, 0u16, tag, cap(input.data))
-        }
-        ContentChoice::Str(s) => {
-            let bytes = { let mut b = s.into_bytes(); b.truncate(4096); b };
-            (Content::String, 3u8, 0u16, Vec::new(), bytes)
-        }
-    };
-    if data.is_empty() {
-        return None;
-    }
+    let items: Vec<EncodeItem> = input
+        .items
+        .into_iter()
+        .take(4)
+        .map(EncodeItem::from)
+        .collect();
 
     let nonce = if input.nonce == [0u8; 12] {
         [1u8; 12]
@@ -184,11 +298,7 @@ fn normalize(input: EncodeInput) -> Option<Normalized> {
     Some(Normalized {
         keys,
         paths,
-        content,
-        ctype,
-        bip,
-        tag,
-        data,
+        items,
         nonce,
         geometric_pad: input.geometric_pad,
         decoys,
@@ -206,9 +316,9 @@ fn cap(mut data: Vec<u8>) -> Vec<u8> {
 /// treat the ciphertext as opaque length-delimited framing and defer the AEAD
 /// size check to decrypt, so no ciphertext-length normalization is needed.
 pub fn diff_decode(data: &[u8]) {
-    let rust = rust_decode(data);
-    let c = c_impl::decode(data);
-    let cpp = cpp_impl::decode(data);
+    let rust = rust_decode(data).map(Decoded::canonical);
+    let c = c_impl::decode(data).map(Decoded::canonical);
+    let cpp = cpp_impl::decode(data).map(Decoded::canonical);
     if rust != c || rust != cpp {
         panic!(
             "decode divergence:\n  rust={:?}\n  c={:?}\n  cpp={:?}",
@@ -226,10 +336,7 @@ pub fn diff_encode(input: EncodeInput) {
     let c = c_impl::encode(
         &n.keys,
         &n.paths,
-        n.ctype,
-        n.bip,
-        &n.tag,
-        &n.data,
+        &n.items,
         n.geometric_pad,
         &n.nonce,
         &n.decoys,
@@ -246,7 +353,9 @@ pub fn diff_encode(input: EncodeInput) {
 }
 
 /// Encode a valid container, then decrypt it in every arm and compare the
-/// recovered item data (cross-implementation encrypt/decrypt interop).
+/// recovered items (cross-implementation encrypt/decrypt interop). C++'s
+/// `DecryptBackupContentsWithKey` returns only each item's data and its payload
+/// walker is private, so content types are compared between Rust and C only.
 pub fn diff_decrypt(input: EncodeInput) {
     let Some(n) = normalize(input) else {
         return;
@@ -255,10 +364,10 @@ pub fn diff_decrypt(input: EncodeInput) {
         return;
     };
     let key = n.keys[0];
-    let rust = rust_decrypt_data(&blob, &key);
-    let c = c_impl::decrypt_data(&blob, &key);
+    let rust = rust_decrypt_items(&blob, &key);
+    let c = c_impl::decrypt_items(&blob, &key);
     let cpp = cpp_impl::decrypt_data(&blob, &key);
-    if rust != c || rust != cpp {
+    if rust != c || rust.as_deref().map(item_data) != cpp {
         panic!(
             "decrypt divergence:\n  rust={:?}\n  c={:?}\n  cpp={:?}",
             rust, c, cpp,

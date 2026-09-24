@@ -25,14 +25,14 @@ implementations must produce identical bytes; a mismatch is a bug.
 ## Targets
 
 - **`diff_decode`** (3-way): decode raw bytes in every arm, compare accept/reject
-  and the parsed fields (paths, secrets, nonce, ciphertext). Pure framing, no
-  crypto.
+  and the parsed fields (paths and secrets sorted and deduplicated, nonce,
+  ciphertext). Pure framing, no crypto.
 - **`diff_decrypt`** (3-way): encode a container, decrypt it in every arm, compare
-  the recovered item data.
-- **`diff_encode`** (Rust vs C): encode the same input with an explicit nonce and
-  decoys, compare the container byte-for-byte. The C++ arm is not byte-compared:
-  `CreateEncryptedBackup` draws its own randomness and parses a descriptor, so there
-  is no deterministic low-level encode entry to drive.
+  the recovered items (content type and data; the C++ arm reports data only).
+- **`diff_encode`** (Rust vs C): encode the same input (up to 4 items) with an
+  explicit nonce and decoys, compare the container byte-for-byte. The C++ arm is
+  not byte-compared: `CreateEncryptedBackup` draws its own randomness and parses a
+  descriptor, so there is no deterministic low-level encode entry to drive.
 
 ### Convergence note
 

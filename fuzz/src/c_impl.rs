@@ -2,14 +2,16 @@
 //! production crypto, mbedTLS via PSA (the reference callbacks in
 //! `test/test_crypto.c`, identical to Kern's `bip138_crypto.c`).
 
-use std::collections::BTreeSet;
 use std::os::raw::c_int;
 use std::ptr;
 use std::slice;
 
-use crate::Decoded;
+use crate::{ContentType, Decoded, EncodeItem, Item};
 
 pub const BIP138_OK: c_int = 0;
+pub const BIP138_CONTENT_BIP: u8 = 0x01;
+pub const BIP138_CONTENT_PROPRIETARY: u8 = 0x02;
+pub const BIP138_CONTENT_STRING: u8 = 0x03;
 
 #[repr(C)]
 struct Crypto {
@@ -61,8 +63,6 @@ unsafe extern "C" {
     ) -> c_int;
 
     fn bip138_secret_bucket(n_real: usize) -> usize;
-
-    fn bip138_path_is_common(path: *const Path) -> c_int;
 
     fn bip138_item_iter_init(it: *mut ItemIter, plaintext: *const u8, len: usize);
 
@@ -141,21 +141,21 @@ pub fn decode(bytes: &[u8]) -> Option<Decoded> {
                 s.copy_from_slice(&secrets_bytes[i * 32..(i + 1) * 32]);
                 s
             })
-            .collect::<BTreeSet<_>>();
+            .collect::<Vec<_>>();
 
         let mut nonce = [0u8; 12];
         nonce.copy_from_slice(slice::from_raw_parts(cont.nonce, 12));
 
         let ciphertext = slice::from_raw_parts(cont.ciphertext, cont.ciphertext_len).to_vec();
 
-        let mut paths = BTreeSet::new();
+        let mut paths = Vec::new();
         for i in 0..cont.path_count as usize {
             let mut child = [0u32; 256];
             let mut depth = 0usize;
             if bip138_path_at(&cont, i, child.as_mut_ptr(), child.len(), &mut depth) != BIP138_OK {
                 return None;
             }
-            paths.insert(child[..depth].to_vec());
+            paths.push(child[..depth].to_vec());
         }
 
         Some(Decoded {
@@ -204,38 +204,40 @@ pub fn decrypt(bytes: &[u8], key: &[u8; 32]) -> Option<Vec<u8>> {
     }
 }
 
-/// Deterministically encode a single content item to keys with an explicit nonce
-/// and explicit decoys. `content_type`/`bip`/`tag` describe the item; `data` is
-/// its plaintext; `paths` is the raw child-number lists. `None` on any failure.
-#[allow(clippy::too_many_arguments)]
-pub fn encode(
+/// Deterministically encode content items to keys with an explicit nonce and
+/// explicit decoys. `paths` is the raw child-number lists. `None` on any failure.
+pub(crate) fn encode(
     keys: &[[u8; 32]],
     paths: &[Vec<u32>],
-    content_type: u8,
-    bip: u16,
-    tag: &[u8],
-    data: &[u8],
+    items: &[EncodeItem],
     geometric_pad: bool,
     nonce: &[u8; 12],
     decoys: &[[u8; 32]],
 ) -> Option<Vec<u8>> {
     unsafe {
-        let item = CItem {
-            content: CContent {
-                type_: content_type,
-                bip,
-                tag: if tag.is_empty() { ptr::null() } else { tag.as_ptr() },
-                tag_len: tag.len(),
-            },
-            data: data.as_ptr(),
-            data_len: data.len(),
-        };
-        // Encode the plaintext payload (content metadata + item + padding).
+        let c_items: Vec<CItem> = items
+            .iter()
+            .map(|item| CItem {
+                content: CContent {
+                    type_: item.content.ctype,
+                    bip: item.content.bip,
+                    tag: if item.content.tag.is_empty() {
+                        ptr::null()
+                    } else {
+                        item.content.tag.as_ptr()
+                    },
+                    tag_len: item.content.tag.len(),
+                },
+                data: item.data.as_ptr(),
+                data_len: item.data.len(),
+            })
+            .collect();
+        // Encode the plaintext payload (content metadata + items + padding).
         let mut payload = vec![0u8; 1 << 20];
         let mut payload_len = 0usize;
         if bip138_plaintext_encode(
-            &item,
-            1,
+            c_items.as_ptr(),
+            c_items.len(),
             geometric_pad as c_int,
             payload.as_mut_ptr(),
             payload.len(),
@@ -294,17 +296,25 @@ pub fn secret_bucket(n_real: usize) -> usize {
     unsafe { bip138_secret_bucket(n_real) }
 }
 
-/// Whether a path is one of the 140 common paths both encoders drop.
-pub fn path_is_common(path: &[u32]) -> bool {
-    let p = Path {
-        child: path.as_ptr(),
-        depth: path.len() as u8,
-    };
-    unsafe { bip138_path_is_common(&p) != 0 }
+fn content_type(content: &CContent) -> ContentType {
+    match content.type_ {
+        BIP138_CONTENT_BIP => ContentType::Bip(content.bip),
+        BIP138_CONTENT_PROPRIETARY => ContentType::Proprietary(tag(content).to_vec()),
+        BIP138_CONTENT_STRING => ContentType::String,
+        _ => ContentType::Unknown,
+    }
 }
 
-/// Decrypt a container with one key and return the recovered item data.
-pub fn decrypt_data(bytes: &[u8], key: &[u8; 32]) -> Option<Vec<Vec<u8>>> {
+fn tag(content: &CContent) -> &[u8] {
+    if content.tag_len == 0 {
+        &[]
+    } else {
+        unsafe { slice::from_raw_parts(content.tag, content.tag_len) }
+    }
+}
+
+/// Decrypt a container with one key and return the recovered items.
+pub fn decrypt_items(bytes: &[u8], key: &[u8; 32]) -> Option<Vec<Item>> {
     let payload = decrypt(bytes, key)?;
     let mut items = Vec::new();
     unsafe {
@@ -332,7 +342,10 @@ pub fn decrypt_data(bytes: &[u8], key: &[u8; 32]) -> Option<Vec<Vec<u8>>> {
             if rc == 0 {
                 break;
             }
-            items.push(slice::from_raw_parts(item.data, item.data_len).to_vec());
+            items.push((
+                content_type(&item.content),
+                slice::from_raw_parts(item.data, item.data_len).to_vec(),
+            ));
         }
     }
     Some(items)
