@@ -488,6 +488,10 @@ fn geometric_bucket(len: usize) -> Result<usize, Error> {
 /// Each item is a `(content_metadata, plaintext)` pair. Zero-fill padding after the
 /// last item doubles as the `0x00` terminator that `decode_plaintext` stops at.
 pub fn encode_plaintext(items: &[(&[u8], &[u8])], padding: Padding) -> Result<Vec<u8>, Error> {
+    // A payload MUST hold at least one item; `decode_plaintext` rejects one without.
+    if items.is_empty() {
+        return Err(Error::EmptyBytes);
+    }
     let mut payload = Vec::new();
     for (content_metadata, data) in items {
         payload.extend_from_slice(content_metadata);

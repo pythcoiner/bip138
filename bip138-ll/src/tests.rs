@@ -485,6 +485,23 @@ fn test_decode_plaintext_rejects_empty() {
 }
 
 #[test]
+fn test_encode_rejects_no_items() {
+    for padding in [Padding::None, Padding::Geometric] {
+        assert_eq!(encode_plaintext(&[], padding), Err(Error::EmptyBytes));
+        let res = encrypt_chacha20_poly1305_v1_items_with_decoys(
+            &RustBitcoin,
+            vec![],
+            &[],
+            vec![[2; 32]],
+            padding,
+            [1; 12],
+            &[],
+        );
+        assert_eq!(res, Err(Error::EmptyBytes));
+    }
+}
+
+#[test]
 fn test_simple_encode_decode_encrypted_payload() {
     let bytes = encode_encrypted_payload([3; 12], &[1, 2, 3, 4]).unwrap();
     let mut expected = [3; 12].to_vec();
