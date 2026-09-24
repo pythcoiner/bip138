@@ -84,3 +84,10 @@ path = "fuzz_targets/diff_plaintext.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "diff_components"
+path = "fuzz_targets/diff_components.rs"
+test = false
+doc = false
+bench = false

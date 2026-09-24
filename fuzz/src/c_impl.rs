@@ -6,7 +6,7 @@ use std::os::raw::c_int;
 use std::ptr;
 use std::slice;
 
-use crate::{ContentType, Decoded, EncodeItem, Item};
+use crate::{ContentType, Decoded, EncodeContent, EncodeItem, Item};
 
 pub const BIP138_OK: c_int = 0;
 pub const BIP138_CONTENT_BIP: u8 = 0x01;
@@ -72,6 +72,36 @@ unsafe extern "C" {
         items: *const CItem,
         n_items: usize,
         geometric_pad: c_int,
+        out: *mut u8,
+        out_cap: usize,
+        out_len: *mut usize,
+    ) -> c_int;
+
+    fn bip138_content_parse(
+        buf: *const u8,
+        len: usize,
+        out: *mut CContent,
+        consumed: *mut usize,
+    ) -> c_int;
+
+    fn bip138_content_encode(
+        content: *const CContent,
+        out: *mut u8,
+        out_cap: usize,
+        out_len: *mut usize,
+    ) -> c_int;
+
+    fn bip138_paths_encode(
+        paths: *const Path,
+        n_paths: usize,
+        out: *mut u8,
+        out_cap: usize,
+        out_len: *mut usize,
+    ) -> c_int;
+
+    fn bip138_secrets_encode(
+        secrets: *const u8,
+        n_secrets: usize,
         out: *mut u8,
         out_cap: usize,
         out_len: *mut usize,
@@ -218,16 +248,7 @@ pub(crate) fn encode(
         let c_items: Vec<CItem> = items
             .iter()
             .map(|item| CItem {
-                content: CContent {
-                    type_: item.content.ctype,
-                    bip: item.content.bip,
-                    tag: if item.content.tag.is_empty() {
-                        ptr::null()
-                    } else {
-                        item.content.tag.as_ptr()
-                    },
-                    tag_len: item.content.tag.len(),
-                },
+                content: c_content(&item.content),
                 data: item.data.as_ptr(),
                 data_len: item.data.len(),
             })
@@ -250,13 +271,7 @@ pub(crate) fn encode(
 
         let flat_keys: Vec<u8> = keys.iter().flatten().copied().collect();
         let flat_decoys: Vec<u8> = decoys.iter().flatten().copied().collect();
-        let c_paths: Vec<Path> = paths
-            .iter()
-            .map(|p| Path {
-                child: p.as_ptr(),
-                depth: p.len() as u8,
-            })
-            .collect();
+        let c_paths = c_paths(paths);
 
         let mut out = vec![0u8; payload.len() + (1 << 16)];
         let mut out_len = 0usize;
@@ -289,6 +304,104 @@ pub(crate) fn encode(
         out.truncate(out_len);
         Some(out)
     }
+}
+
+fn c_content(content: &EncodeContent) -> CContent {
+    CContent {
+        type_: content.ctype,
+        bip: content.bip,
+        tag: if content.tag.is_empty() {
+            ptr::null()
+        } else {
+            content.tag.as_ptr()
+        },
+        tag_len: content.tag.len(),
+    }
+}
+
+/// Borrow the raw child-number lists as C paths. A depth above 255 does not fit
+/// the C struct's u8, so callers keep paths within it.
+fn c_paths(paths: &[Vec<u32>]) -> Vec<Path> {
+    paths
+        .iter()
+        .map(|p| Path {
+            child: p.as_ptr(),
+            depth: p.len() as u8,
+        })
+        .collect()
+}
+
+/// Parse one CONTENT_TYPE field: bytes consumed and the content type.
+pub fn parse_content(bytes: &[u8]) -> Option<(usize, ContentType)> {
+    let mut content = CContent {
+        type_: 0,
+        bip: 0,
+        tag: ptr::null(),
+        tag_len: 0,
+    };
+    let mut consumed = 0usize;
+    let rc =
+        unsafe { bip138_content_parse(bytes.as_ptr(), bytes.len(), &mut content, &mut consumed) };
+    if rc != BIP138_OK {
+        return None;
+    }
+    Some((consumed, content_type(&content)))
+}
+
+/// Encode a CONTENT_TYPE field.
+pub(crate) fn encode_content(content: &EncodeContent) -> Option<Vec<u8>> {
+    let content = c_content(content);
+    let mut out = vec![0u8; 1 + 9 + content.tag_len];
+    let mut out_len = 0usize;
+    let rc = unsafe { bip138_content_encode(&content, out.as_mut_ptr(), out.len(), &mut out_len) };
+    if rc != BIP138_OK {
+        return None;
+    }
+    out.truncate(out_len);
+    Some(out)
+}
+
+/// Encode a DERIVATION_PATHS field (count prefix included). Paths must fit the
+/// C struct, see `c_paths`.
+pub fn encode_paths(paths: &[Vec<u32>]) -> Option<Vec<u8>> {
+    let c_paths = c_paths(paths);
+    let mut out = vec![0u8; 1 + paths.iter().map(|p| 1 + 4 * p.len()).sum::<usize>()];
+    let mut out_len = 0usize;
+    let rc = unsafe {
+        bip138_paths_encode(
+            c_paths.as_ptr(),
+            c_paths.len(),
+            out.as_mut_ptr(),
+            out.len(),
+            &mut out_len,
+        )
+    };
+    if rc != BIP138_OK {
+        return None;
+    }
+    out.truncate(out_len);
+    Some(out)
+}
+
+/// Encode an INDIVIDUAL_SECRETS field (count prefix included).
+pub fn encode_secrets(secrets: &[[u8; 32]]) -> Option<Vec<u8>> {
+    let flat: Vec<u8> = secrets.iter().flatten().copied().collect();
+    let mut out = vec![0u8; 1 + flat.len()];
+    let mut out_len = 0usize;
+    let rc = unsafe {
+        bip138_secrets_encode(
+            flat.as_ptr(),
+            secrets.len(),
+            out.as_mut_ptr(),
+            out.len(),
+            &mut out_len,
+        )
+    };
+    if rc != BIP138_OK {
+        return None;
+    }
+    out.truncate(out_len);
+    Some(out)
 }
 
 /// Decoy bucket for `n_real` recipients (5, 10, 20, ... 255).

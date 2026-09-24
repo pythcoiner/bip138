@@ -1,7 +1,8 @@
 // C++ arm of the differential fuzzer: bind Sjors/bitcoin's
-// wallet/encrypted_backup decode and decrypt to Rust through cxx. Encode is not
-// bound: CreateEncryptedBackup draws its own randomness and parses a descriptor,
-// so there is no deterministic low-level encode entry to compare byte-for-byte.
+// wallet/encrypted_backup decode, decrypt and component codecs to Rust through
+// cxx. Container encode is not bound: CreateEncryptedBackup draws its own
+// randomness and parses a descriptor, so there is no deterministic low-level
+// encode entry to compare byte-for-byte.
 
 #include "encrypted_backup-fuzz/src/cpp_impl.rs.h"
 
@@ -59,6 +60,86 @@ CppItems cpp_decrypt(rust::Slice<const std::uint8_t> data,
     }
     out.ok = true;
     return out;
+}
+
+CppContent cpp_decode_content(rust::Slice<const std::uint8_t> data) {
+    CppContent out;
+    out.ok = false;
+    out.known = false;
+    out.type_ = 0;
+    out.bip = 0;
+    out.consumed = 0;
+    auto res = wallet::DecodeContentType(std::span<const uint8_t>(data.data(), data.size()));
+    if (!res) return out;
+    const auto& [content, consumed] = *res;
+    if (content) {
+        out.known = true;
+        out.type_ = static_cast<uint8_t>(content->type);
+        out.bip = content->bip_number;
+        for (uint8_t b : content->payload) out.payload.push_back(b);
+    }
+    out.consumed = consumed;
+    out.ok = true;
+    return out;
+}
+
+CppPaths cpp_decode_paths(rust::Slice<const std::uint8_t> data) {
+    CppPaths out;
+    out.ok = false;
+    auto res = wallet::DecodeDerivationPaths(std::span<const uint8_t>(data.data(), data.size()));
+    if (!res) return out;
+    for (const auto& p : *res) {
+        CppPath cp;
+        for (uint32_t c : p) cp.child.push_back(c);
+        out.paths.push_back(std::move(cp));
+    }
+    out.ok = true;
+    return out;
+}
+
+CppBytes cpp_decode_secrets(rust::Slice<const std::uint8_t> data) {
+    CppBytes out;
+    out.ok = false;
+    auto res = wallet::DecodeIndividualSecrets(std::span<const uint8_t>(data.data(), data.size()));
+    if (!res) return out;
+    for (const uint256& s : *res) {
+        for (int i = 0; i < 32; ++i) out.bytes.push_back(s.data()[i]);
+    }
+    out.ok = true;
+    return out;
+}
+
+// Copy an encoder's result into the shared byte vector.
+static CppBytes to_bytes(const util::Result<std::vector<uint8_t>>& res) {
+    CppBytes out;
+    out.ok = false;
+    if (!res) return out;
+    for (uint8_t b : *res) out.bytes.push_back(b);
+    out.ok = true;
+    return out;
+}
+
+CppBytes cpp_encode_content(std::uint8_t type_, std::uint16_t bip,
+                            rust::Slice<const std::uint8_t> payload) {
+    wallet::EncryptedBackupContentType content;
+    content.type = static_cast<wallet::DataType>(type_);
+    content.bip_number = bip;
+    content.payload.assign(payload.begin(), payload.end());
+    return to_bytes(wallet::EncodeContentType(content));
+}
+
+CppBytes cpp_encode_paths(rust::Slice<const CppPath> paths) {
+    std::vector<wallet::DerivationPath> in;
+    for (const CppPath& p : paths) in.emplace_back(p.child.begin(), p.child.end());
+    return to_bytes(wallet::EncodeDerivationPaths(in));
+}
+
+CppBytes cpp_encode_secrets(rust::Slice<const std::uint8_t> secrets) {
+    std::vector<uint256> in;
+    for (size_t i = 0; i + 32 <= secrets.size(); i += 32) {
+        in.emplace_back(std::span<const unsigned char>(secrets.data() + i, 32));
+    }
+    return to_bytes(wallet::EncodeIndividualSecrets(in));
 }
 
 }  // namespace bip138shim

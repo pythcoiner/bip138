@@ -12,9 +12,20 @@ namespace bip138shim {
 
 struct CppDecoded;
 struct CppItems;
+struct CppContent;
+struct CppPaths;
+struct CppBytes;
+struct CppPath;
 
 CppDecoded cpp_decode(::rust::Slice<::std::uint8_t const> data);
 CppItems cpp_decrypt(::rust::Slice<::std::uint8_t const> data,
                      ::rust::Slice<::std::uint8_t const> key);
+CppContent cpp_decode_content(::rust::Slice<::std::uint8_t const> data);
+CppPaths cpp_decode_paths(::rust::Slice<::std::uint8_t const> data);
+CppBytes cpp_decode_secrets(::rust::Slice<::std::uint8_t const> data);
+CppBytes cpp_encode_content(::std::uint8_t type_, ::std::uint16_t bip,
+                            ::rust::Slice<::std::uint8_t const> payload);
+CppBytes cpp_encode_paths(::rust::Slice<CppPath const> paths);
+CppBytes cpp_encode_secrets(::rust::Slice<::std::uint8_t const> secrets);
 
 }  // namespace bip138shim

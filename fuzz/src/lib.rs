@@ -170,7 +170,7 @@ fn rust_encode(input: &Normalized) -> Option<Vec<u8>> {
 // --- Fuzz input, normalized so a mismatch is a bug, not a shape difference ---
 
 #[derive(Arbitrary, Debug)]
-enum ContentChoice {
+pub enum ContentChoice {
     Bip(u16),
     Proprietary(Vec<u8>),
     Str(String),
@@ -247,6 +247,16 @@ impl From<ItemChoice> for EncodeItem {
             data,
         }
     }
+}
+
+/// Structured input for `diff_components`.
+#[derive(Arbitrary, Debug)]
+pub enum ComponentInput {
+    /// Raw bytes fed to every content-type, paths and secrets parser.
+    Decode(Vec<u8>),
+    EncodeContent(ContentChoice),
+    EncodePaths(Vec<Vec<u32>>),
+    EncodeSecrets(Vec<[u8; 32]>),
 }
 
 /// Input after canonicalization: distinct non-NUMS keys, a non-zero nonce, and
@@ -428,6 +438,111 @@ fn compare_decrypt(blob: &[u8], key: &[u8; 32]) {
     if !c_agrees || !cpp_agrees {
         panic!(
             "decrypt divergence:\n  rust={:?}\n  c={:?}\n  cpp={:?}",
+            rust, c, cpp,
+        );
+    }
+}
+
+/// Run each arm's component codecs (CONTENT_TYPE, DERIVATION_PATHS,
+/// INDIVIDUAL_SECRETS) on the same input and compare accept/reject and results.
+pub fn diff_components(input: ComponentInput) {
+    match input {
+        ComponentInput::Decode(bytes) => {
+            compare_parse_content(&bytes);
+            compare_decode_paths(&bytes);
+            compare_decode_secrets(&bytes);
+        }
+        ComponentInput::EncodeContent(content) => compare_encode_content(content),
+        ComponentInput::EncodePaths(paths) => compare_encode_paths(paths),
+        ComponentInput::EncodeSecrets(secrets) => compare_encode_secrets(&secrets),
+    }
+}
+
+fn compare_parse_content(bytes: &[u8]) {
+    let rust = ll::parse_content(bytes)
+        .ok()
+        .map(|(consumed, content)| (consumed, rust_content_type(content)));
+    let c = c_impl::parse_content(bytes);
+    let cpp = cpp_impl::parse_content(bytes);
+    if rust != c || rust != cpp {
+        panic!(
+            "content parse divergence:\n  rust={:?}\n  c={:?}\n  cpp={:?}",
+            rust, c, cpp,
+        );
+    }
+}
+
+// C has no standalone paths or secrets parser: both live inside `bip138_parse`,
+// which `diff_decode` already covers, so only Rust and C++ are compared here.
+// C++ reports no consumed length, so only the parsed lists are compared.
+
+fn compare_decode_paths(bytes: &[u8]) {
+    // Order and duplicates carry no meaning at parse, see `Decoded::canonical`.
+    let rust = ll::parse_derivation_paths(bytes)
+        .ok()
+        .map(|(_, paths)| sorted_unique(paths.iter().map(|p| p.to_u32_vec().to_vec()).collect()));
+    let cpp = cpp_impl::decode_paths(bytes).map(sorted_unique);
+    if rust != cpp {
+        panic!(
+            "paths decode divergence:\n  rust={:?}\n  cpp={:?}",
+            rust, cpp
+        );
+    }
+}
+
+fn compare_decode_secrets(bytes: &[u8]) {
+    let rust = ll::parse_individual_secrets(bytes)
+        .ok()
+        .map(|(_, secrets)| sorted_unique(secrets));
+    let cpp = cpp_impl::decode_secrets(bytes).map(sorted_unique);
+    if rust != cpp {
+        panic!(
+            "secrets decode divergence:\n  rust={:?}\n  cpp={:?}",
+            rust, cpp
+        );
+    }
+}
+
+fn compare_encode_content(content: ContentChoice) {
+    let content = EncodeContent::from(content);
+    let rust = Vec::<u8>::try_from(content.content.clone()).ok();
+    let c = c_impl::encode_content(&content);
+    let cpp = cpp_impl::encode_content(&content);
+    if rust != c || rust != cpp {
+        panic!(
+            "content encode divergence:\n  rust={:?}\n  c={:?}\n  cpp={:?}",
+            rust, c, cpp,
+        );
+    }
+}
+
+fn compare_encode_paths(paths: Vec<Vec<u32>>) {
+    // `bip138_paths_encode` caps the input at 255 paths before dedup (Rust and C++
+    // cap the deduplicated set) and its depth is a u8, both documented in
+    // bip138.h, so C only joins inputs inside that contract.
+    let c = (paths.len() <= 255 && paths.iter().all(|p| p.len() <= 255))
+        .then(|| c_impl::encode_paths(&paths));
+    let cpp = cpp_impl::encode_paths(&paths);
+    let rust =
+        ll::encode_derivation_paths(paths.into_iter().map(DerivationPath::from).collect()).ok();
+    if rust != cpp || c.as_ref().is_some_and(|c| *c != rust) {
+        panic!(
+            "paths encode divergence:\n  rust={:?}\n  c={:?}\n  cpp={:?}",
+            rust, c, cpp,
+        );
+    }
+}
+
+fn compare_encode_secrets(secrets: &[[u8; 32]]) {
+    // `bip138_secrets_encode` caps the input at 255 secrets before dedup (Rust and
+    // C++ cap the deduplicated set), documented in bip138.h, so C only joins
+    // inputs inside that contract.
+    let c = (secrets.len() <= 255).then(|| c_impl::encode_secrets(secrets));
+    let cpp = cpp_impl::encode_secrets(secrets);
+    let rust = ll::encode_individual_secrets(secrets).ok();
+    if rust != cpp || c.as_ref().is_some_and(|c| *c != rust) {
+        panic!(
+            "secrets encode divergence:\n  rust={:?}\n  c={:?}\n  cpp={:?}",
             rust, c, cpp,
         );
     }

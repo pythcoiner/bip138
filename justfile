@@ -54,7 +54,7 @@ fuzz seconds:
 diff-fuzz seconds:
     #!/usr/bin/env sh
     set -u
-    for target in diff_decode diff_decrypt diff_encode diff_plaintext; do
+    for target in diff_decode diff_decrypt diff_encode diff_plaintext diff_components; do
         echo "=== differential fuzzing $target for {{seconds}}s ==="
         if ! cargo +nightly fuzz build "$target"; then
             echo "!!! build failed for $target (did you run 'just fuzz-init'?)" >&2
