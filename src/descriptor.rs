@@ -455,63 +455,63 @@ pub mod tests {
 }
 
 #[cfg(all(test, feature = "rand"))]
-mod keys_types {
-    use super::*;
-    use alloc::{string::String, vec::Vec};
+mod recipient_keys {
+    use alloc::{collections::BTreeSet, string::String, vec::Vec};
+    use core::str::FromStr;
 
-    const TEST_VECTORS_JSON: &str = include_str!("../test_vectors/keys_types.json");
+    use crate::{
+        EncryptedBackup, Error, ToPayload,
+        miniscript::{Descriptor, DescriptorPublicKey},
+    };
 
-    #[derive(serde::Deserialize, serde::Serialize)]
+    const TEST_VECTORS_JSON: &str = include_str!("../test_vectors/recipient_keys.json");
 
+    #[derive(serde::Deserialize)]
     struct TestVector {
         description: String,
-        key: String,
-        // Some(hex) → expression is allowed; expected x-only normalization.
-        // None      → expression is disallowed; dpk_to_pk must return Err.
-        expected: Option<String>,
+        descriptors: Vec<String>,
+        // None: the encoder must refuse
+        expected_keys: Option<Vec<String>>,
     }
 
     #[test]
-    fn test_vector_keys_types() {
+    fn test_vector_recipient_keys() {
         let vectors: Vec<TestVector> = serde_json::from_str(TEST_VECTORS_JSON).unwrap();
 
         for v in vectors {
-            let dpk = DescriptorPublicKey::from_str(&v.key).expect(&v.description);
-            match (&v.expected, dpk_to_pk(&dpk)) {
-                (Some(hex_expected), Ok(pk)) => {
-                    let res = hex::encode(pk.x_only_public_key().0.serialize());
-                    assert_eq!(*hex_expected, res, "{}", v.description);
+            // This implementation does not support MuSig.
+            if v.descriptors.iter().any(|d| d.contains("musig(")) {
+                continue;
+            }
+            let descriptors = v
+                .descriptors
+                .iter()
+                .map(|d| Descriptor::<DescriptorPublicKey>::from_str(d).expect(&v.description))
+                .collect::<Vec<_>>();
+            let payloads = descriptors
+                .iter()
+                .map(|d| d as &dyn ToPayload)
+                .collect::<Vec<_>>();
+            let backup = EncryptedBackup::new()
+                .set_payloads(&payloads)
+                .expect(&v.description);
+            match v.expected_keys {
+                Some(expected) => {
+                    let keys = backup
+                        .get_keys()
+                        .iter()
+                        .map(|k| hex::encode(k.x_only_public_key().0.serialize()))
+                        .collect::<BTreeSet<_>>()
+                        .into_iter()
+                        .collect::<Vec<_>>();
+                    assert_eq!(keys, expected, "{}", v.description);
+                    backup.encrypt().expect(&v.description);
                 }
-                (None, Err(_)) => {
-                    // Disallowed expression correctly rejected by dpk_to_pk.
-                }
-                (Some(_), Err(e)) => {
-                    panic!(
-                        "{}: expected allowed but dpk_to_pk failed with {e:?}",
-                        v.description
-                    );
-                }
-                (None, Ok(_)) => {
-                    panic!(
-                        "{}: expected disallowed but dpk_to_pk succeeded",
-                        v.description
-                    );
+                None => {
+                    let err = backup.encrypt().unwrap_err();
+                    assert_eq!(err, Error::DescriptorHasNoKeys, "{}", v.description);
                 }
             }
         }
-    }
-
-    #[test]
-    #[ignore]
-    fn regenerate_vectors() {
-        let mut vectors: Vec<TestVector> = serde_json::from_str(TEST_VECTORS_JSON).unwrap();
-        for v in vectors.iter_mut() {
-            let dpk = DescriptorPublicKey::from_str(&v.key).expect(&v.description);
-            v.expected = dpk_to_pk(&dpk)
-                .ok()
-                .map(|pk| hex::encode(pk.x_only_public_key().0.serialize()));
-        }
-        let out = serde_json::to_string_pretty(&vectors).unwrap();
-        std::fs::write("test_vectors/keys_types.json", out + "\n").unwrap();
     }
 }

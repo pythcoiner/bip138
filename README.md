@@ -179,12 +179,11 @@ the spec or the crypto changes (cipher, tag strings, key width, TYPE
 encoding, …), the `expected` fields in those JSON files must be
 recomputed.
 
-Four `#[ignore]` helpers are provided for that purpose; each rewrites a
+Three `#[ignore]` helpers are provided for that purpose; each rewrites a
 single vector file in place from the current code:
 
 | Test                                            | File rewritten                              |
 |-------------------------------------------------|---------------------------------------------|
-| `descriptor::tests::regenerate_vectors`         | `test_vectors/keys_types.json`              |
 | `ll::encryption_secret::regenerate_vectors`     | `test_vectors/encryption_secret.json`       |
 | `ll::encryption_vectors::regenerate_vectors`    | `test_vectors/chacha20poly1305_encryption.json` |
 | `ll::encrypted_backup::regenerate_vectors`      | `test_vectors/encrypted_backup.json`        |
