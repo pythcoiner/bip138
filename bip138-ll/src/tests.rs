@@ -1681,3 +1681,59 @@ mod content_vectors {
         assert_eq!(parsed, expected);
     }
 }
+
+mod payload_vectors {
+    use crate::{Content, decode_plaintext};
+    use alloc::{string::String, vec::Vec};
+
+    const TEST_VECTORS_JSON: &str = include_str!("../../test_vectors/payload.json");
+
+    #[derive(serde::Deserialize)]
+    struct TestVector {
+        description: String,
+        valid: bool,
+        payload: String,
+        #[serde(default)]
+        items: Vec<Item>,
+    }
+
+    #[derive(serde::Deserialize)]
+    struct Item {
+        #[serde(rename = "type")]
+        content_type: u8,
+        content: String,
+    }
+
+    // The vectors only give the TYPE byte, which leads the encoded CONTENT.
+    fn type_byte(content: Content) -> u8 {
+        Vec::<u8>::try_from(content).expect("known content type")[0]
+    }
+
+    #[test]
+    fn test_vector_payload() {
+        let vectors: Vec<TestVector> = serde_json::from_str(TEST_VECTORS_JSON).unwrap();
+
+        for v in vectors {
+            let payload = hex::decode(&v.payload).expect(&v.description);
+            match decode_plaintext(&payload) {
+                Ok(items) => {
+                    assert!(v.valid, "{}", v.description);
+                    let items = items
+                        .into_iter()
+                        .map(|(content, bytes)| (type_byte(content), bytes))
+                        .collect::<Vec<_>>();
+                    let expected = v
+                        .items
+                        .iter()
+                        .map(|item| {
+                            let bytes = hex::decode(&item.content).expect(&v.description);
+                            (item.content_type, bytes)
+                        })
+                        .collect::<Vec<_>>();
+                    assert_eq!(items, expected, "{}", v.description);
+                }
+                Err(_) => assert!(!v.valid, "{}", v.description),
+            }
+        }
+    }
+}
