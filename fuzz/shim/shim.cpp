@@ -142,4 +142,14 @@ CppBytes cpp_encode_secrets(rust::Slice<const std::uint8_t> secrets) {
     return to_bytes(wallet::EncodeIndividualSecrets(in));
 }
 
+CppBytes cpp_reencode(rust::Slice<const std::uint8_t> data) {
+    CppBytes out;
+    out.ok = false;
+    auto res = wallet::DecodeEncryptedBackup(std::span<const uint8_t>(data.data(), data.size()));
+    if (!res) return out;
+    for (uint8_t b : wallet::EncodeEncryptedBackup(*res)) out.bytes.push_back(b);
+    out.ok = true;
+    return out;
+}
+
 }  // namespace bip138shim

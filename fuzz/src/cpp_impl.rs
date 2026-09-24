@@ -70,6 +70,7 @@ mod ffi {
         fn cpp_encode_content(type_: u8, bip: u16, payload: &[u8]) -> CppBytes;
         fn cpp_encode_paths(paths: &[CppPath]) -> CppBytes;
         fn cpp_encode_secrets(secrets: &[u8]) -> CppBytes;
+        fn cpp_reencode(data: &[u8]) -> CppBytes;
     }
 }
 
@@ -174,6 +175,12 @@ pub fn encode_paths(paths: &[Vec<u32>]) -> Option<Vec<u8>> {
 pub fn encode_secrets(secrets: &[[u8; 32]]) -> Option<Vec<u8>> {
     let flat: Vec<u8> = secrets.iter().flatten().copied().collect();
     bytes(ffi::cpp_encode_secrets(&flat))
+}
+
+/// Decode a container and re-serialize the decoded struct with
+/// `EncodeEncryptedBackup`. `None` when the decode rejects.
+pub fn reencode(data: &[u8]) -> Option<Vec<u8>> {
+    bytes(ffi::cpp_reencode(data))
 }
 
 fn bytes(b: ffi::CppBytes) -> Option<Vec<u8>> {

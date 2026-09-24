@@ -116,6 +116,22 @@ fn rust_decrypt_items(bytes: &[u8], key: &[u8; 32]) -> Option<Vec<Item>> {
     )
 }
 
+/// Re-serialize a parsed container with the Rust field and container encoders.
+fn rust_reencode(d: &Decoded) -> Option<Vec<u8>> {
+    let paths = d
+        .paths
+        .iter()
+        .map(|p| DerivationPath::from(p.clone()))
+        .collect();
+    Some(ll::encode_v1(
+        Version::V1.into(),
+        ll::encode_derivation_paths(paths).ok()?,
+        ll::encode_individual_secrets(&d.secrets).ok()?,
+        Encryption::ChaCha20Poly1305.into(),
+        ll::encode_encrypted_payload(d.nonce, &d.ciphertext).ok()?,
+    ))
+}
+
 /// Wrap `plaintext` byte-exact as the payload of a container for
 /// `PLAINTEXT_KEY`, with no paths and no decoys. `None` for an empty plaintext,
 /// which cannot be encrypted.
@@ -354,6 +370,29 @@ pub fn diff_decode(data: &[u8]) {
     if rust != c || rust != cpp {
         panic!(
             "decode divergence:\n  rust={:?}\n  c={:?}\n  cpp={:?}",
+            rust, c, cpp,
+        );
+    }
+}
+
+/// On bytes every arm decodes, re-serialize each arm's own parse with its own
+/// encoders and compare the containers byte-for-byte.
+pub fn diff_reencode(data: &[u8]) {
+    let (Some(rust_decoded), Some(c_decoded)) = (rust_decode(data), c_impl::decode(data)) else {
+        return;
+    };
+    let Some(cpp) = cpp_impl::reencode(data) else {
+        return;
+    };
+    // Rust's `encode_encrypted_payload` refuses an empty ciphertext (empty payloads
+    // MUST be rejected), while the parsers defer that to decrypt and C++'s
+    // `EncodeEncryptedBackup` serializes any struct, so Rust only joins when there
+    // is a ciphertext.
+    let rust = (!rust_decoded.ciphertext.is_empty()).then(|| rust_reencode(&rust_decoded));
+    let c = c_impl::reencode(&c_decoded);
+    if c.as_ref() != Some(&cpp) || rust.as_ref().is_some_and(|r| r.as_ref() != Some(&cpp)) {
+        panic!(
+            "reencode divergence:\n  rust={:?}\n  c={:?}\n  cpp={:?}",
             rust, c, cpp,
         );
     }

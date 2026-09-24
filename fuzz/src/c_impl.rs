@@ -9,6 +9,9 @@ use std::slice;
 use crate::{ContentType, Decoded, EncodeContent, EncodeItem, Item};
 
 pub const BIP138_OK: c_int = 0;
+pub const BIP138_MAGIC: &[u8] = b"BIP138";
+pub const BIP138_VERSION: u8 = 0x01;
+pub const BIP138_ENCRYPTION_CHACHA20_POLY1305: u8 = 0x01;
 pub const BIP138_CONTENT_BIP: u8 = 0x01;
 pub const BIP138_CONTENT_PROPRIETARY: u8 = 0x02;
 pub const BIP138_CONTENT_STRING: u8 = 0x03;
@@ -106,6 +109,10 @@ unsafe extern "C" {
         out_cap: usize,
         out_len: *mut usize,
     ) -> c_int;
+
+    // Internal (bip138_internal.h) but exported: the CompactSize writer the C
+    // encoder uses for the ciphertext length.
+    fn bip138_varint_write(out: *mut u8, out_cap: usize, value: u64, written: *mut usize) -> c_int;
 
     fn bip138_encrypt_ex(
         c: *const Crypto,
@@ -401,6 +408,33 @@ pub fn encode_secrets(secrets: &[[u8; 32]]) -> Option<Vec<u8>> {
         return None;
     }
     out.truncate(out_len);
+    Some(out)
+}
+
+/// Re-serialize a parsed container. C has no container serializer, so compose
+/// its field encoders and CompactSize writer around the fixed header bytes.
+pub fn reencode(d: &Decoded) -> Option<Vec<u8>> {
+    let mut out = BIP138_MAGIC.to_vec();
+    out.push(BIP138_VERSION);
+    out.extend(encode_paths(&d.paths)?);
+    out.extend(encode_secrets(&d.secrets)?);
+    out.push(BIP138_ENCRYPTION_CHACHA20_POLY1305);
+    out.extend_from_slice(&d.nonce);
+    let mut len = [0u8; 9];
+    let mut written = 0usize;
+    let rc = unsafe {
+        bip138_varint_write(
+            len.as_mut_ptr(),
+            len.len(),
+            d.ciphertext.len() as u64,
+            &mut written,
+        )
+    };
+    if rc != BIP138_OK {
+        return None;
+    }
+    out.extend_from_slice(&len[..written]);
+    out.extend_from_slice(&d.ciphertext);
     Some(out)
 }
 

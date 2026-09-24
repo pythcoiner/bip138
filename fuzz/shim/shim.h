@@ -27,5 +27,6 @@ CppBytes cpp_encode_content(::std::uint8_t type_, ::std::uint16_t bip,
                             ::rust::Slice<::std::uint8_t const> payload);
 CppBytes cpp_encode_paths(::rust::Slice<CppPath const> paths);
 CppBytes cpp_encode_secrets(::rust::Slice<::std::uint8_t const> secrets);
+CppBytes cpp_reencode(::rust::Slice<::std::uint8_t const> data);
 
 }  // namespace bip138shim
