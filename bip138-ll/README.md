@@ -10,7 +10,7 @@ consumer plug in its own crypto.
 
 The `bip138` crate sits on top of this one and supplies the concrete pieces:
 secp256k1 public-key handling, descriptor and miniscript parsing, base64, the v0
-(AES-GCM) decrypt fallback, and the `beb` CLI.
+(AES-GCM) decrypt fallback, and the `bip138` CLI.
 
 ## Supplying the crypto (Rust)
 

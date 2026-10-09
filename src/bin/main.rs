@@ -185,7 +185,7 @@ enum Commands {
     },
 }
 
-/// Piped arguments are expected to be there already (`cat args | beb ...`), so
+/// Piped arguments are expected to be there already (`cat args | bip138 ...`), so
 /// give up quickly rather than block on a pipe that never delivers.
 const STDIN_TIMEOUT: Duration = Duration::from_millis(200);
 
@@ -967,7 +967,7 @@ mod tests {
 
     #[test]
     fn stdin_args_reads_nothing_from_blank_input() {
-        // a bare newline, as `echo | beb` produces, must add no argument
+        // a bare newline, as `echo | bip138` produces, must add no argument
         assert_eq!(args(" \n\t "), Vec::<OsString>::new());
     }
 
@@ -1017,7 +1017,7 @@ mod tests {
     #[test]
     fn piped_args_reach_the_parser() {
         let cli = Cli::parse_from(
-            ["beb", "encrypt"]
+            ["bip138", "encrypt"]
                 .map(OsString::from)
                 .into_iter()
                 .chain(args("--msg note")),

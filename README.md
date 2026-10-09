@@ -6,19 +6,22 @@ Devices are **not mandatory**; you can use the tool completely off-device.
 
 ## CLI
 
-### Build
+### Install
 
-To build the cli without device support:
+To install the cli without device support:
 
 ```
-cargo build --bin beb --release --no-default-features --features="cli"
+cargo install bip138 --features cli
 ```
 
 or with devices support, which needs `libudev-dev` and `pkg-config` installed:
 
 ```
-cargo build --bin beb --release --no-default-features --features="cli,devices"
+cargo install bip138 --features cli,devices
 ```
+
+From a checkout, `cargo build --bin bip138 --release --features cli` builds it
+in place.
 
 Note: if a signing device supported by
 [`async-hwi`](https://github.com/wizardsardine/async-hwi) is connected and unlocked,
@@ -28,10 +31,10 @@ the CLI will automatically try to fetch a set of xpubs from it.
 ### Usage:
 
 ```
-$ beb --help
+$ bip138 --help
 BIP138 Compact encryption scheme for Non-seed wallet data
 
-Usage: beb [OPTIONS] <COMMAND>
+Usage: bip138 [OPTIONS] <COMMAND>
 
 Commands:
   encrypt  Encrypt some descriptor
@@ -45,10 +48,10 @@ Options:
   -V, --version          Print version
 ```
 ```
-$ beb encrypt --help
+$ bip138 encrypt --help
 Encrypt some descriptor
 
-Usage: beb encrypt [OPTIONS]
+Usage: bip138 encrypt [OPTIONS]
 
 Options:
   -f, --file <FILE>
@@ -94,10 +97,10 @@ Options:
 
 ```
 ```
-$ beb decrypt --help
+$ bip138 decrypt --help
 Decrypt an encrypted descriptor with a given xpub
 
-Usage: beb decrypt [OPTIONS]
+Usage: bip138 decrypt [OPTIONS]
 
 Options:
   -f, --file <FILE>      Input file to be decrypted
