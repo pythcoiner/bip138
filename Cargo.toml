@@ -1,6 +1,6 @@
 [package]
 name = "bip138"
-version = "0.0.0"
+version = "0.1.0"
 edition = "2024"
 rust-version = "1.88"
 description = "BIP138 Compact encryption scheme for Non-seed wallet data"
@@ -21,7 +21,7 @@ exclude = ["fuzz", "examples"]
 # Dependency-free wire format and crypto core. The `rust-bitcoin` provider is
 # always on so `EncryptedBackup` has SHA-256 and ChaCha20-Poly1305 to hand; the
 # `rand` feature below adds the OS entropy source for nonces.
-bip138-ll = { path = "bip138-ll", default-features = false, features = ["rust-bitcoin"] }
+bip138-ll = { version = "0.1.0", path = "bip138-ll", default-features = false, features = ["rust-bitcoin"] }
 base64 = {version = "0.22", default-features = false, features = ["alloc"], optional = true}
 
 # Old format (BEB magic, AES-256-GCM): used solely on the decrypt path
