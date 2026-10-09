@@ -10,3 +10,6 @@ cargo test --no-default-features --features "miniscript_latest rand base64 v0" -
 cargo test --features cli --verbose --color always -- --nocapture
 # device support is feature gated too, and its tests need no device
 cargo test --features "cli devices" --verbose --color always -- --nocapture
+# downstream crates built against each miniscript backend
+cargo run --manifest-path examples/miniscript_12_0/Cargo.toml
+cargo run --manifest-path examples/miniscript_12_3_5/Cargo.toml

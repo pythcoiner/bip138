@@ -1,6 +1,9 @@
-use crate::miniscript::bitcoin::{
-    Network,
-    bip32::{self, DerivationPath, Fingerprint},
+use crate::{
+    backend::{Active, Backend},
+    miniscript::bitcoin::{
+        Network,
+        bip32::{self, DerivationPath, Fingerprint},
+    },
 };
 use async_hwi::{
     DeviceKind, HWI,
@@ -360,7 +363,7 @@ fn common_derivation_paths(kind: DeviceKind, network: Network) -> Vec<(Derivatio
     crate::ll::common_derivation_paths(coin_type(network))
         .into_iter()
         .map(|path| {
-            let path = crate::bitcoin_path(&path);
+            let path = Active::from_ll_path(&path);
             let expect = common_derivation_path_expect(kind, &path);
             (path, expect)
         })

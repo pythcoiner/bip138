@@ -1,0 +1,14 @@
+[package]
+name = "bip138-example-miniscript-12-0"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+# Pinned to the oldest supported release, the floor bip138 declares.
+[dependencies]
+miniscript = { version = "=12.0.0", default-features = false, features = ["no-std"] }
+bip138 = { path = "../..", default-features = false, features = ["miniscript_12", "rand"] }
+
+[[bin]]
+name = "roundtrip"
+path = "../shared/roundtrip.rs"

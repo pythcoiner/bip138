@@ -14,6 +14,26 @@ use core::{
 use crate::Error;
 use crate::ll;
 
+#[cfg(not(feature = "miniscript_12"))]
+compile_error!("A miniscript backend must be selected with a feature flag");
+
+// The miniscript release the backend is built on, for callers that need its
+// concrete types (xpubs, networks).
+#[cfg(feature = "miniscript_12")]
+pub use mscript_12 as miniscript;
+
+pub mod rust_miniscript;
+
+#[cfg(all(test, feature = "rand"))]
+pub mod tests;
+
+pub type Active = crate::backend::rust_miniscript::Miniscript;
+
+pub type PublicKey = <Active as Backend>::PublicKey;
+pub type DerivationPath = <Active as Backend>::DerivationPath;
+pub type DescriptorKey = <Active as Backend>::DescriptorKey;
+pub type Descriptor = <Active as Backend>::Descriptor;
+
 /// Serde support the backup documents need on the types they store, only
 /// required with the `descriptor_backup` feature.
 #[cfg(feature = "descriptor_backup")]

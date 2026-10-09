@@ -12,3 +12,6 @@ cargo clippy --all-targets --features cli -- -D warnings
 # device support is feature gated too, and the cfg(not(devices)) arms only
 # compile in the pass above, so both are needed
 cargo clippy --all-targets --features "cli devices" -- -D warnings
+# downstream crates built against each miniscript backend
+cargo clippy --manifest-path examples/miniscript_12_0/Cargo.toml -- -D warnings
+cargo clippy --manifest-path examples/miniscript_12_3_5/Cargo.toml -- -D warnings

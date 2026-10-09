@@ -160,9 +160,8 @@ Enable the core's `ffi` feature for a hand-written C binding (`bip138_encrypt` /
 
 | Feature flag        | Default | Description                                           |
 |---------------------|---------|-------------------------------------------------------|
-| `miniscript_12_0`   | –       | Compile against `miniscript` v0.12.0                  |
-| `miniscript_12_3_5` | –       | Compile against `miniscript` v0.12.3.5                |
-| `miniscript_latest` | ✓       | Alias for `miniscript_12_3_5`                         |
+| `miniscript_12`     | –       | Compile against `miniscript` 12 (12.0 or later)       |
+| `miniscript_latest` | ✓       | Alias for `miniscript_12`                             |
 | `devices`           | -       | Enable automatic enumeration of signing devices.      |
 | `tokio`             | ✓       | Pull in `tokio` runtime used by the `devices`feature. |
 | `rand`              | ✓       | Enable random nonce generation                        |

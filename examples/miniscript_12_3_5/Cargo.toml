@@ -1,0 +1,13 @@
+[package]
+name = "bip138-example-miniscript-12-3-5"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+[dependencies]
+miniscript = { version = "=12.3.5", default-features = false, features = ["no-std"] }
+bip138 = { path = "../..", default-features = false, features = ["miniscript_12", "rand"] }
+
+[[bin]]
+name = "roundtrip"
+path = "../shared/roundtrip.rs"

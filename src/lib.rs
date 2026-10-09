@@ -9,13 +9,7 @@ use core::str::FromStr;
 
 use descriptor::descr_to_dpks;
 
-use crate::miniscript::{
-    Descriptor, DescriptorPublicKey,
-    bitcoin::{
-        bip32::{ChildNumber, DerivationPath},
-        secp256k1,
-    },
-};
+use crate::backend::{Active, Backend, DerivationPath, Descriptor, DescriptorKey, PublicKey};
 #[cfg(feature = "descriptor_backup")]
 pub use descriptor_backup::{DescriptorBackup, DescriptorSet, parse_descriptor_backup};
 pub use ll::{Content, Encryption, Padding, Version};
@@ -29,34 +23,12 @@ pub mod backend;
 pub mod descriptor;
 #[cfg(feature = "descriptor_backup")]
 pub mod descriptor_backup;
+pub use crate::backend::miniscript;
 pub use bip138_ll as ll;
-pub mod miniscript;
 #[cfg(feature = "descriptor_backup")]
 pub mod policy_backup;
 #[cfg(feature = "devices")]
 pub mod signing_devices;
-#[cfg(feature = "descriptor_backup")]
-pub mod wallet_policy;
-
-/// x-only serialization of a public key, the form the `ll` core keys on.
-pub(crate) fn xonly_key(key: &secp256k1::PublicKey) -> [u8; 32] {
-    key.x_only_public_key().0.serialize()
-}
-
-/// Convert a `bitcoin` derivation path into the `ll` core's own path type.
-pub(crate) fn ll_path(path: &DerivationPath) -> ll::DerivationPath {
-    ll::DerivationPath::from(path.to_u32_vec())
-}
-
-/// Convert an `ll` core derivation path back into a `bitcoin` one.
-pub(crate) fn bitcoin_path(path: &ll::DerivationPath) -> DerivationPath {
-    DerivationPath::from(
-        path.to_u32_vec()
-            .iter()
-            .map(|child| ChildNumber::from(*child))
-            .collect::<Vec<ChildNumber>>(),
-    )
-}
 
 /// Non-fatal signal raised while extracting keys from a descriptor: a key
 /// expression was sorted out of the encryption-key set. The cosigner
@@ -65,12 +37,12 @@ pub(crate) fn bitcoin_path(path: &ll::DerivationPath) -> DerivationPath {
 pub enum Warning {
     /// The expression is not allowed by the BIP (e.g. literal pubkey, or
     /// bare xpub with no trailing derivation and no wildcard).
-    DisallowedKeyExpression(DescriptorPublicKey),
+    DisallowedKeyExpression(DescriptorKey),
     /// The expression resolves to the BIP341 NUMS point.
-    NumsKey(DescriptorPublicKey),
+    NumsKey(DescriptorKey),
     /// A literal key or bare xpub in the payload puts this root on chain, so
     /// it is dropped from the encryption-key set.
-    ExposedRoot(secp256k1::PublicKey),
+    ExposedRoot(PublicKey),
 }
 
 /// Output of [`EncryptedBackup::encrypt`]: the encoded backup plus any
@@ -97,8 +69,8 @@ pub trait ToPayload {
     fn content_type(&self) -> Content;
     /// Origin derivation path of each encryption key, paired with that key so the
     /// path goes when the key is dropped.
-    fn key_derivation_paths(&self) -> Result<Vec<(secp256k1::PublicKey, DerivationPath)>, Error>;
-    fn keys(&self) -> Result<Vec<secp256k1::PublicKey>, Error>;
+    fn key_derivation_paths(&self) -> Result<Vec<(PublicKey, DerivationPath)>, Error>;
+    fn keys(&self) -> Result<Vec<PublicKey>, Error>;
     /// Warnings about filtered key expressions. Default empty.
     fn warnings(&self) -> Result<Vec<Warning>, Error> {
         Ok(vec![])
@@ -117,10 +89,10 @@ impl ToPayload for Vec<u8> {
     fn content_type(&self) -> Content {
         Content::Unknown
     }
-    fn key_derivation_paths(&self) -> Result<Vec<(secp256k1::PublicKey, DerivationPath)>, Error> {
+    fn key_derivation_paths(&self) -> Result<Vec<(PublicKey, DerivationPath)>, Error> {
         Ok(vec![])
     }
-    fn keys(&self) -> Result<Vec<secp256k1::PublicKey>, Error> {
+    fn keys(&self) -> Result<Vec<PublicKey>, Error> {
         Ok(vec![])
     }
 }
@@ -132,10 +104,10 @@ impl ToPayload for String {
     fn content_type(&self) -> Content {
         Content::String
     }
-    fn key_derivation_paths(&self) -> Result<Vec<(secp256k1::PublicKey, DerivationPath)>, Error> {
+    fn key_derivation_paths(&self) -> Result<Vec<(PublicKey, DerivationPath)>, Error> {
         Ok(vec![])
     }
-    fn keys(&self) -> Result<Vec<secp256k1::PublicKey>, Error> {
+    fn keys(&self) -> Result<Vec<PublicKey>, Error> {
         Ok(vec![])
     }
 }
@@ -150,15 +122,15 @@ impl ToPayload for Bip138 {
     fn content_type(&self) -> Content {
         Content::Bip138
     }
-    fn key_derivation_paths(&self) -> Result<Vec<(secp256k1::PublicKey, DerivationPath)>, Error> {
+    fn key_derivation_paths(&self) -> Result<Vec<(PublicKey, DerivationPath)>, Error> {
         Ok(vec![])
     }
-    fn keys(&self) -> Result<Vec<secp256k1::PublicKey>, Error> {
+    fn keys(&self) -> Result<Vec<PublicKey>, Error> {
         Ok(vec![])
     }
 }
 
-impl ToPayload for Descriptor<DescriptorPublicKey> {
+impl ToPayload for Descriptor {
     fn to_payload(&self) -> Result<Vec<u8>, Error> {
         Ok(self.to_string().as_bytes().to_vec())
     }
@@ -167,11 +139,11 @@ impl ToPayload for Descriptor<DescriptorPublicKey> {
         Content::Bip380
     }
 
-    fn key_derivation_paths(&self) -> Result<Vec<(secp256k1::PublicKey, DerivationPath)>, Error> {
+    fn key_derivation_paths(&self) -> Result<Vec<(PublicKey, DerivationPath)>, Error> {
         Ok(descriptor::dpks_to_key_paths(&descr_to_dpks(self)))
     }
 
-    fn keys(&self) -> Result<Vec<secp256k1::PublicKey>, Error> {
+    fn keys(&self) -> Result<Vec<PublicKey>, Error> {
         let dpks = descr_to_dpks(self);
         let (k, _) = descriptor::dpks_to_derivation_keys_paths(&dpks);
         Ok(k)
@@ -231,7 +203,7 @@ impl EncryptedMetadata {
                 let ciphertext_lens = ll::decode_v1_encrypted_payload_lengths(bytes)?;
                 Ok(Self {
                     version,
-                    derivation_paths: derivation_paths.iter().map(bitcoin_path).collect(),
+                    derivation_paths: derivation_paths.iter().map(Active::from_ll_path).collect(),
                     individual_secrets,
                     encryption: encryption.into(),
                     nonce,
@@ -263,7 +235,7 @@ impl EncryptedMetadata {
 
         Ok(Self {
             version: Version::V0,
-            derivation_paths: derivation_paths.iter().map(bitcoin_path).collect(),
+            derivation_paths: derivation_paths.iter().map(Active::from_ll_path).collect(),
             individual_secrets,
             encryption: Encryption::AesGcm256,
             nonce,
@@ -293,7 +265,7 @@ impl Proprietary for NoProprietary {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Decrypted<P = NoProprietary> {
-    Descriptor(Box<Descriptor<DescriptorPublicKey>>),
+    Descriptor(Box<Descriptor>),
     #[cfg(feature = "descriptor_backup")]
     DescriptorBackup(Box<DescriptorBackup>),
     #[cfg(feature = "descriptor_backup")]
@@ -342,11 +314,11 @@ pub struct EncryptedBackup {
     content: Content,
     encryption: Encryption,
     derivation_paths: Vec<DerivationPath>,
-    keys: Vec<secp256k1::PublicKey>,
+    keys: Vec<PublicKey>,
     // x-only keys the payload puts on chain, pooled across all its items
     exposed_keys: Vec<[u8; 32]>,
     // each payload key with its derivation path, to drop the path with the key
-    key_paths: Vec<(secp256k1::PublicKey, DerivationPath)>,
+    key_paths: Vec<(PublicKey, DerivationPath)>,
     payload: Payload,
     warnings: Vec<Warning>,
     padding: Padding,
@@ -376,7 +348,7 @@ impl EncryptedBackup {
     pub fn get_derivation_paths(&self) -> Vec<DerivationPath> {
         self.derivation_paths.clone()
     }
-    pub fn get_keys(&self) -> Vec<secp256k1::PublicKey> {
+    pub fn get_keys(&self) -> Vec<PublicKey> {
         self.keys.clone()
     }
     pub fn get_content(&self) -> Content {
@@ -388,7 +360,7 @@ impl EncryptedBackup {
     pub fn get_encryption(&self) -> Encryption {
         self.encryption
     }
-    pub fn set_keys(mut self, keys: Vec<secp256k1::PublicKey>) -> Self {
+    pub fn set_keys(mut self, keys: Vec<PublicKey>) -> Self {
         self.keys = keys;
         self.drop_exposed_keys();
         self
@@ -449,7 +421,7 @@ impl EncryptedBackup {
         };
         Ok(self)
     }
-    fn add_key_paths(&mut self, key_paths: Vec<(secp256k1::PublicKey, DerivationPath)>) {
+    fn add_key_paths(&mut self, key_paths: Vec<(PublicKey, DerivationPath)>) {
         self.derivation_paths
             .extend(key_paths.iter().map(|(_, path)| path.clone()));
         self.key_paths.extend(key_paths);
@@ -462,7 +434,7 @@ impl EncryptedBackup {
         let exposed = &self.exposed_keys;
         let warnings = &mut self.warnings;
         self.keys.retain(|key| {
-            if !exposed.contains(&xonly_key(key)) {
+            if !exposed.contains(&Active::xonly(key)) {
                 return true;
             }
             let warning = Warning::ExposedRoot(*key);
@@ -474,7 +446,7 @@ impl EncryptedBackup {
         let (kept, dropped): (Vec<_>, Vec<_>) = self
             .key_paths
             .iter()
-            .partition(|(key, _)| !exposed.contains(&xonly_key(key)));
+            .partition(|(key, _)| !exposed.contains(&Active::xonly(key)));
         self.derivation_paths.retain(|path| {
             kept.iter().any(|(_, p)| p == path) || !dropped.iter().any(|(_, p)| p == path)
         });
@@ -503,11 +475,11 @@ impl EncryptedBackup {
         // the OS draws the nonce and decoys; without it the caller supplies them and
         // the core validates the decoy count.
         let crypto = ll::crypto::RustBitcoin;
-        let keys = self.keys.iter().map(xonly_key).collect::<Vec<_>>();
+        let keys = self.keys.iter().map(Active::xonly).collect::<Vec<_>>();
         let derivation_paths = self
             .derivation_paths
             .iter()
-            .map(ll_path)
+            .map(Active::to_ll_path)
             .collect::<Vec<_>>();
 
         match (self.encryption, self.version) {
@@ -624,7 +596,7 @@ impl EncryptedBackup {
             Version::V1 => {
                 let (derivation_paths, individual_secrets, encryption_type, nonce, cyphertext) =
                     ll::decode_v1(bytes)?;
-                self.derivation_paths = derivation_paths.iter().map(bitcoin_path).collect();
+                self.derivation_paths = derivation_paths.iter().map(Active::from_ll_path).collect();
                 self.encryption = encryption_type.into();
                 self.payload = Payload::DecryptV1 {
                     cyphertext,
@@ -665,7 +637,7 @@ impl EncryptedBackup {
         // Try a bare descriptor first; fall back to a JSON descriptor
         // backup document if it is not a descriptor.
         let descr_str = String::from_utf8(bytes).map_err(|_| Error::Utf8)?;
-        match Descriptor::<DescriptorPublicKey>::from_str(&descr_str) {
+        match Descriptor::from_str(&descr_str) {
             Ok(descriptor) => Ok(Decrypted::Descriptor(Box::new(descriptor))),
             #[cfg(feature = "descriptor_backup")]
             Err(_) => {
@@ -731,7 +703,7 @@ impl EncryptedBackup {
                     for key in &self.keys {
                         if let Ok(items) = ll::decrypt_chacha20_poly1305_v1(
                             &crypto,
-                            xonly_key(key),
+                            Active::xonly(key),
                             &individual_secrets.clone(),
                             cyphertext.clone(),
                             *nonce,
@@ -782,6 +754,7 @@ impl EncryptedBackup {
 #[cfg(all(test, feature = "rand"))]
 mod string_tests {
     use super::*;
+    use crate::miniscript::bitcoin::secp256k1;
 
     #[test]
     fn string_roundtrip() {
@@ -807,7 +780,7 @@ mod string_tests {
     #[test]
     fn string_before_descriptor_roundtrip() {
         let msg = String::from("backup note");
-        let descriptor = descriptor::tests::descr_1();
+        let descriptor = backend::tests::descr_1();
         let payloads: [&dyn ToPayload; 2] = [&msg, &descriptor];
         let backup = EncryptedBackup::new().set_payloads(&payloads).unwrap();
         let keys = backup.get_keys();
@@ -852,7 +825,7 @@ mod string_tests {
 
     #[test]
     fn bip138_wrapping_decrypts_one_level_at_a_time() {
-        let descriptor = descriptor::tests::descr_1();
+        let descriptor = backend::tests::descr_1();
         let base = EncryptedBackup::new()
             .set_payload(&descriptor)
             .unwrap()
@@ -923,7 +896,7 @@ mod metadata_tests {
 
     #[test]
     fn metadata_ignores_trailing_bytes() {
-        let descriptor = descriptor::tests::descr_1();
+        let descriptor = backend::tests::descr_1();
         let bytes = EncryptedBackup::new()
             .set_payload(&descriptor)
             .unwrap()
@@ -951,12 +924,10 @@ mod skip_unimplemented_tests {
         fn content_type(&self) -> Content {
             Content::Bip329
         }
-        fn key_derivation_paths(
-            &self,
-        ) -> Result<Vec<(secp256k1::PublicKey, DerivationPath)>, Error> {
+        fn key_derivation_paths(&self) -> Result<Vec<(PublicKey, DerivationPath)>, Error> {
             Ok(vec![])
         }
-        fn keys(&self) -> Result<Vec<secp256k1::PublicKey>, Error> {
+        fn keys(&self) -> Result<Vec<PublicKey>, Error> {
             Ok(vec![])
         }
     }
@@ -964,7 +935,7 @@ mod skip_unimplemented_tests {
     #[test]
     fn bip329_item_before_descriptor_is_skipped() {
         let labels = Labels(b"{\"type\":\"tx\"}".to_vec());
-        let descriptor = descriptor::tests::descr_1();
+        let descriptor = backend::tests::descr_1();
         let payloads: [&dyn ToPayload; 2] = [&labels, &descriptor];
         let backup = EncryptedBackup::new().set_payloads(&payloads).unwrap();
         let keys = backup.get_keys();
@@ -982,7 +953,7 @@ mod skip_unimplemented_tests {
     #[test]
     fn proprietary_item_before_descriptor_is_skipped() {
         // Proprietary content cannot go through set_payloads, encode at the ll level.
-        let descriptor = descriptor::tests::descr_1();
+        let descriptor = backend::tests::descr_1();
         let keys = descriptor.keys().unwrap();
         let descr_str = descriptor.to_string();
         let items: [(Content, &[u8]); 2] = [
@@ -991,7 +962,7 @@ mod skip_unimplemented_tests {
         ];
         let crypto = ll::crypto::RustBitcoin;
         let mut rng = ll::crypto::OsRandom;
-        let xkeys = keys.iter().map(xonly_key).collect::<Vec<_>>();
+        let xkeys = keys.iter().map(Active::xonly).collect::<Vec<_>>();
         let bytes = ll::encrypt_chacha20_poly1305_v1_items(
             &crypto,
             &mut rng,
@@ -1013,12 +984,12 @@ mod skip_unimplemented_tests {
 
     #[test]
     fn only_unimplemented_items_decrypt_to_empty() {
-        let descriptor = descriptor::tests::descr_1();
+        let descriptor = backend::tests::descr_1();
         let keys = descriptor.keys().unwrap();
         let items: [(Content, &[u8]); 1] = [(Content::Bip329, b"{\"type\":\"tx\"}".as_slice())];
         let crypto = ll::crypto::RustBitcoin;
         let mut rng = ll::crypto::OsRandom;
-        let xkeys = keys.iter().map(xonly_key).collect::<Vec<_>>();
+        let xkeys = keys.iter().map(Active::xonly).collect::<Vec<_>>();
         let bytes = ll::encrypt_chacha20_poly1305_v1_items(
             &crypto,
             &mut rng,
@@ -1065,11 +1036,11 @@ mod proprietary_tests {
 
     /// Encode `items` at the ll level: proprietary content cannot go through
     /// set_payloads.
-    fn encrypted(items: &[(Content, &[u8])]) -> (Vec<u8>, Vec<secp256k1::PublicKey>) {
-        let keys = descriptor::tests::descr_1().keys().unwrap();
+    fn encrypted(items: &[(Content, &[u8])]) -> (Vec<u8>, Vec<PublicKey>) {
+        let keys = backend::tests::descr_1().keys().unwrap();
         let crypto = ll::crypto::RustBitcoin;
         let mut rng = ll::crypto::OsRandom;
-        let xkeys = keys.iter().map(xonly_key).collect::<Vec<_>>();
+        let xkeys = keys.iter().map(Active::xonly).collect::<Vec<_>>();
         let bytes = ll::encrypt_chacha20_poly1305_v1_items(
             &crypto,
             &mut rng,
@@ -1082,7 +1053,7 @@ mod proprietary_tests {
         (bytes, keys)
     }
 
-    fn decrypt_with_note(bytes: &[u8], keys: Vec<secp256k1::PublicKey>) -> Vec<Decrypted<Note>> {
+    fn decrypt_with_note(bytes: &[u8], keys: Vec<PublicKey>) -> Vec<Decrypted<Note>> {
         EncryptedBackup::new()
             .set_encrypted_payload(bytes)
             .unwrap()
@@ -1105,7 +1076,7 @@ mod proprietary_tests {
 
     #[test]
     fn unknown_tag_is_skipped_and_later_items_still_decrypt() {
-        let descriptor = descriptor::tests::descr_1();
+        let descriptor = backend::tests::descr_1();
         let descr_str = descriptor.to_string();
         let (bytes, keys) = encrypted(&[
             (Content::Proprietary(vec![THEIRS]), b"not ours".as_slice()),
@@ -1134,7 +1105,7 @@ mod proprietary_tests {
 
     #[test]
     fn proprietary_before_descriptor_keeps_both_in_order() {
-        let descriptor = descriptor::tests::descr_1();
+        let descriptor = backend::tests::descr_1();
         let descr_str = descriptor.to_string();
         let (bytes, keys) = encrypted(&[
             (Content::Proprietary(vec![OURS]), b"note".as_slice()),
@@ -1205,7 +1176,7 @@ mod tests {
 
     #[test]
     fn test_simple_encrypted_descriptor() {
-        let descriptor = descriptor::tests::descr_1();
+        let descriptor = backend::tests::descr_1();
         let backp = EncryptedBackup::new().set_payload(&descriptor).unwrap();
         let keys = backp.get_keys();
         let bytes = backp.encrypt().unwrap().bytes;
@@ -1245,7 +1216,7 @@ mod tests {
     fn test_padding_is_payload_only() {
         // Padding never changes the Encryption value: the byte stays 0x01 and
         // the ciphertext size only reveals the bucket, not the real size.
-        let descriptor = descriptor::tests::descr_1();
+        let descriptor = backend::tests::descr_1();
         let backp = EncryptedBackup::new()
             .set_payload(&descriptor)
             .unwrap()
@@ -1286,7 +1257,7 @@ mod tests {
         assert!(!backp.payload.is_none());
 
         assert!(backp.get_keys().is_empty());
-        let pk1 = dpk_to_pk(&descriptor::tests::dpk_1()).unwrap();
+        let pk1 = dpk_to_pk(&backend::tests::dpk_1()).unwrap();
         backp = backp.set_keys(vec![pk1]);
         let pks = backp.get_keys();
         assert_eq!(pks.len(), 1);
@@ -1356,7 +1327,7 @@ mod tests {
     }
 
     pub fn dummy_encrypted_payload() -> Vec<u8> {
-        let key = dpk_to_pk(&descriptor::tests::dpk_1()).unwrap();
+        let key = dpk_to_pk(&backend::tests::dpk_1()).unwrap();
         EncryptedBackup::new()
             .set_payload(&vec![0x00])
             .unwrap()
@@ -1390,7 +1361,7 @@ mod tests {
 
     #[test]
     fn test_decrypt_wrong_payload() {
-        let key = dpk_to_pk(&descriptor::tests::dpk_1()).unwrap();
+        let key = dpk_to_pk(&backend::tests::dpk_1()).unwrap();
         // No payload
         let fail = EncryptedBackup::new()
             .set_keys(vec![key])
@@ -1424,7 +1395,7 @@ mod tests {
     fn test_decrypt_unsupported_encryption() {
         // A backup whose ENCRYPTION byte is an undefined algorithm id must fail
         // with UnsupportedEncryption, not WrongKey.
-        let key = dpk_to_pk(&descriptor::tests::dpk_1()).unwrap();
+        let key = dpk_to_pk(&backend::tests::dpk_1()).unwrap();
         let bytes = EncryptedBackup::new()
             .set_payload(&vec![0x00])
             .unwrap()
@@ -1601,7 +1572,7 @@ mod tests {
         // Direct math check: with a single key, s and s_1 use different tags,
         // so their XOR cannot be all-zero in any practical sense.
         let crypto = ll::crypto::RustBitcoin;
-        let xonly = dpk_to_pk(&descriptor::tests::dpk_1())
+        let xonly = dpk_to_pk(&backend::tests::dpk_1())
             .unwrap()
             .x_only_public_key()
             .0
@@ -1628,7 +1599,7 @@ mod tests {
         // supported by the scheme: encrypt yields a valid blob and the same
         // single key decrypts it back to the original descriptor.
         let descr_str = "wpkh([58b7f8dc/84'/1'/0']tpubDEPBvXvhta3pjVaKokqC3eeMQnszj9ehFaA2zD5nSdkaccwGAizu8jVB2NeSpvmP2P52MBoZvNCixqXRJnTyXx51FQzARR63tjxQSyP3Btw/<0;1>/*)";
-        let descriptor = Descriptor::<DescriptorPublicKey>::from_str(descr_str).unwrap();
+        let descriptor = Descriptor::from_str(descr_str).unwrap();
 
         let backp = EncryptedBackup::new().set_payload(&descriptor).unwrap();
         let keys = backp.get_keys();
@@ -1648,7 +1619,7 @@ mod tests {
     fn test_single_sig_tr_roundtrip() {
         // Same end-to-end check for a single-key tr() (taproot) descriptor.
         let descr_str = "tr([58b7f8dc/86'/1'/0']tpubDEPBvXvhta3pjVaKokqC3eeMQnszj9ehFaA2zD5nSdkaccwGAizu8jVB2NeSpvmP2P52MBoZvNCixqXRJnTyXx51FQzARR63tjxQSyP3Btw/<0;1>/*)";
-        let descriptor = Descriptor::<DescriptorPublicKey>::from_str(descr_str).unwrap();
+        let descriptor = Descriptor::from_str(descr_str).unwrap();
 
         let backp = EncryptedBackup::new().set_payload(&descriptor).unwrap();
         let keys = backp.get_keys();
@@ -1671,7 +1642,7 @@ mod tests {
         // anyone parsing the blob would recover the encryption secret
         // unconditionally.
         let descr_str = "wpkh([58b7f8dc/84'/1'/0']tpubDEPBvXvhta3pjVaKokqC3eeMQnszj9ehFaA2zD5nSdkaccwGAizu8jVB2NeSpvmP2P52MBoZvNCixqXRJnTyXx51FQzARR63tjxQSyP3Btw/<0;1>/*)";
-        let descriptor = Descriptor::<DescriptorPublicKey>::from_str(descr_str).unwrap();
+        let descriptor = Descriptor::from_str(descr_str).unwrap();
 
         let bytes = EncryptedBackup::new()
             .set_payload(&descriptor)
@@ -1705,7 +1676,7 @@ mod tests {
         // would equal the on-chain pubkey, so this expression is invalid and
         // there is no other key to fall back to.
         let descr_str = "wpkh(tpubDEPBvXvhta3pjVaKokqC3eeMQnszj9ehFaA2zD5nSdkaccwGAizu8jVB2NeSpvmP2P52MBoZvNCixqXRJnTyXx51FQzARR63tjxQSyP3Btw)";
-        let descriptor = Descriptor::<DescriptorPublicKey>::from_str(descr_str).unwrap();
+        let descriptor = Descriptor::from_str(descr_str).unwrap();
 
         let err = EncryptedBackup::new()
             .set_payload(&descriptor)
@@ -1719,7 +1690,7 @@ mod tests {
     fn test_reject_single_literal_only_descriptor() {
         // pk(<33-byte hex>); literal Single pubkey, used on-chain verbatim.
         let descr_str = "pk(0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798)";
-        let descriptor = Descriptor::<DescriptorPublicKey>::from_str(descr_str).unwrap();
+        let descriptor = Descriptor::from_str(descr_str).unwrap();
 
         let err = EncryptedBackup::new()
             .set_payload(&descriptor)
@@ -1735,7 +1706,7 @@ mod tests {
         // on-chain key is xpub/0/5, distinct from the xpub root used as the
         // encryption seed, so this expression is valid.
         let descr_str = "wpkh([58b7f8dc/84'/1'/0']tpubDEPBvXvhta3pjVaKokqC3eeMQnszj9ehFaA2zD5nSdkaccwGAizu8jVB2NeSpvmP2P52MBoZvNCixqXRJnTyXx51FQzARR63tjxQSyP3Btw/0/5)";
-        let descriptor = Descriptor::<DescriptorPublicKey>::from_str(descr_str).unwrap();
+        let descriptor = Descriptor::from_str(descr_str).unwrap();
 
         let backp = EncryptedBackup::new().set_payload(&descriptor).unwrap();
         let keys = backp.get_keys();
@@ -1757,7 +1728,7 @@ mod tests {
         // wildcard forces a child derivation, so the on-chain key differs
         // from the xpub root.
         let descr_str = "wpkh([58b7f8dc/84'/1'/0']tpubDEPBvXvhta3pjVaKokqC3eeMQnszj9ehFaA2zD5nSdkaccwGAizu8jVB2NeSpvmP2P52MBoZvNCixqXRJnTyXx51FQzARR63tjxQSyP3Btw/*)";
-        let descriptor = Descriptor::<DescriptorPublicKey>::from_str(descr_str).unwrap();
+        let descriptor = Descriptor::from_str(descr_str).unwrap();
 
         let backp = EncryptedBackup::new().set_payload(&descriptor).unwrap();
         let keys = backp.get_keys();
@@ -1782,7 +1753,7 @@ mod tests {
         let valid_xpub = "[58b7f8dc/48'/1'/0'/2']tpubDEPBvXvhta3pjVaKokqC3eeMQnszj9ehFaA2zD5nSdkaccwGAizu8jVB2NeSpvmP2P52MBoZvNCixqXRJnTyXx51FQzARR63tjxQSyP3Btw/<0;1>/*";
         let bare_xpub = "tpubDC5FSnBiZDMmkoat4aZFfbJdEthnPqJ1jXZcKWJNKC4yJanLA55dRW5qKJRRvAo1SwaXeUx2ayUQyVJ6eCbABbBB8Wn3T7dAuVJRnZgntVC";
         let descr_str = format!("wsh(or_d(pk({valid_xpub}),pk({bare_xpub})))");
-        let descriptor = Descriptor::<DescriptorPublicKey>::from_str(&descr_str).unwrap();
+        let descriptor = Descriptor::from_str(&descr_str).unwrap();
 
         let backp = EncryptedBackup::new().set_payload(&descriptor).unwrap();
         let keys = backp.get_keys();
@@ -1824,7 +1795,7 @@ mod tests {
         let valid_xpub = "[58b7f8dc/48'/1'/0'/2']tpubDEPBvXvhta3pjVaKokqC3eeMQnszj9ehFaA2zD5nSdkaccwGAizu8jVB2NeSpvmP2P52MBoZvNCixqXRJnTyXx51FQzARR63tjxQSyP3Btw/<0;1>/*";
         let bare_xpub = "tpubDC5FSnBiZDMmkoat4aZFfbJdEthnPqJ1jXZcKWJNKC4yJanLA55dRW5qKJRRvAo1SwaXeUx2ayUQyVJ6eCbABbBB8Wn3T7dAuVJRnZgntVC";
         let descr_str = format!("wsh(or_d(pk({valid_xpub}),pk({bare_xpub})))");
-        let descriptor = Descriptor::<DescriptorPublicKey>::from_str(&descr_str).unwrap();
+        let descriptor = Descriptor::from_str(&descr_str).unwrap();
 
         let encrypted = EncryptedBackup::new()
             .set_payload(&descriptor)
@@ -1850,7 +1821,7 @@ mod tests {
         // descriptor's other key still encrypts and the NUMS exclusion
         // surfaces as Warning::NumsKey.
         let descr_str = "tr(50929b74c1a04954b78b4b6035e97a5e078a5a0f28ec96d547bfee9ace803ac0,pk([58b7f8dc/86'/1'/0']tpubDEPBvXvhta3pjVaKokqC3eeMQnszj9ehFaA2zD5nSdkaccwGAizu8jVB2NeSpvmP2P52MBoZvNCixqXRJnTyXx51FQzARR63tjxQSyP3Btw/<0;1>/*))";
-        let descriptor = Descriptor::<DescriptorPublicKey>::from_str(descr_str).unwrap();
+        let descriptor = Descriptor::from_str(descr_str).unwrap();
 
         let encrypted = EncryptedBackup::new()
             .set_payload(&descriptor)
@@ -1872,7 +1843,7 @@ mod tests {
     fn test_no_warnings_on_clean_descriptor() {
         // descr_1 is a well-formed multipath multisig with no NUMS and no
         // disallowed expressions: warnings must be empty.
-        let descriptor = descriptor::tests::descr_1();
+        let descriptor = backend::tests::descr_1();
         let encrypted = EncryptedBackup::new()
             .set_payload(&descriptor)
             .unwrap()
@@ -1941,8 +1912,8 @@ mod descriptor_backup_roundtrip {
     const RECEIVE: &str = "wpkh([d34db33f/84h/1h/0h]tpubDC5FSnBiZDMmhiuCmWAYsLwgLYrrT9rAqvTySfuCCrgsWz8wxMXUS9Tb9iVMvcRbvFcAHGkMD5Kx8koh4GquNGNTfohfk7pgjhaPCdXpoba/0/*)";
     const CHANGE: &str = "wpkh([d34db33f/84h/1h/0h]tpubDC5FSnBiZDMmhiuCmWAYsLwgLYrrT9rAqvTySfuCCrgsWz8wxMXUS9Tb9iVMvcRbvFcAHGkMD5Kx8koh4GquNGNTfohfk7pgjhaPCdXpoba/1/*)";
 
-    fn descr(s: &str) -> Descriptor<DescriptorPublicKey> {
-        Descriptor::<DescriptorPublicKey>::from_str(s).unwrap()
+    fn descr(s: &str) -> Descriptor {
+        Descriptor::from_str(s).unwrap()
     }
 
     fn roundtrip(backup: DescriptorBackup) {
@@ -2022,8 +1993,8 @@ mod policy_backup_roundtrip {
     const KEY1: &str = "[b2b1f0cf/48'/0'/0'/2']xpub6EWhjpPa6FqrcaPBuGBZRJVjzGJ1ZsMygRF26RwN932Vfkn1gyCiTbECVitBjRCkexEvetLdiqzTcYimmzYxyR1BZ79KNevgt61PDcukmC7";
     const KEY_PKH: &str = "[d34db33f/44'/0'/0']xpub6ERApfZwUNrhLCkDtcHTcxd75RbzS1ed54G1LkBUHQVHQKqhMkhgbmJbZRkrgZw4koxb5JaHWkY4ALHY2grBGRjaDMzQLcgJvLJuZZvRcEL";
 
-    fn key(s: &str) -> DescriptorPublicKey {
-        DescriptorPublicKey::from_str(s).unwrap()
+    fn key(s: &str) -> DescriptorKey {
+        DescriptorKey::from_str(s).unwrap()
     }
 
     fn roundtrip(backup: PolicyBackup) {
@@ -2091,9 +2062,9 @@ mod v0_tests {
     // `encrypt(nonce)` signature requires a fixed nonce.
     const NONCE: [u8; 12] = [42u8; 12];
 
-    fn descriptor_and_key() -> (Descriptor<DescriptorPublicKey>, secp256k1::PublicKey) {
-        let d = descriptor::tests::descr_1();
-        let pk = dpk_to_pk(&descriptor::tests::dpk_1()).unwrap();
+    fn descriptor_and_key() -> (Descriptor, PublicKey) {
+        let d = backend::tests::descr_1();
+        let pk = dpk_to_pk(&backend::tests::dpk_1()).unwrap();
         (d, pk)
     }
 
@@ -2239,7 +2210,7 @@ mod v0_tests {
         // Pin "decrypt-only": the current crate must always produce
         // BIP138 blobs, never BEB. A future refactor cannot accidentally
         // re-introduce v0-format output.
-        let descriptor = descriptor::tests::descr_1();
+        let descriptor = backend::tests::descr_1();
         let bytes = EncryptedBackup::new()
             .set_payload(&descriptor)
             .unwrap()

@@ -9,18 +9,13 @@
 //! xpub root never goes on-chain unchanged and is safe to seed encryption.
 
 use alloc::{boxed::Box, collections::BTreeSet, string::String, vec::Vec};
-use core::str::FromStr;
 
 use serde::{Deserialize, Serialize};
 
 use crate::{
     Content, Decrypted, Error, ToPayload, Warning,
-    descriptor::{bip341_nums, dpk_to_deriv_path},
-    miniscript::{
-        Descriptor, DescriptorPublicKey,
-        bitcoin::{bip32::DerivationPath, secp256k1},
-    },
-    wallet_policy::WalletPolicy,
+    backend::{Active, Backend, DerivationPath, Descriptor, DescriptorKey, KeyExpr, PublicKey},
+    descriptor::{BIP341_NUMS, dpk_to_deriv_path},
 };
 
 /// Document version defined by this specification.
@@ -37,7 +32,7 @@ pub struct PolicyBackup {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PolicySet {
-    pub keys: Vec<DescriptorPublicKey>,
+    pub keys: Vec<DescriptorKey>,
     pub policy: String,
     #[serde(default, skip_serializing_if = "core::ops::Not::not")]
     pub archived: bool,
@@ -56,14 +51,13 @@ impl PolicySet {
     /// Build a policy set from a concrete descriptor: the template string and
     /// its key info vector, with no metadata. The template is stored without the
     /// descriptor checksum, matching the BIP388 wire form.
-    pub fn from_descriptor(d: &Descriptor<DescriptorPublicKey>) -> Result<Self, Error> {
-        let wp = WalletPolicy::from_descriptor(d)?;
-        let mut policy = wp.template.to_string();
+    pub fn from_descriptor(d: &Descriptor) -> Result<Self, Error> {
+        let (mut policy, keys) = Active::to_wallet_policy(d)?;
         if let Some(pos) = policy.rfind('#') {
             policy.truncate(pos);
         }
         Ok(PolicySet {
-            keys: wp.key_info,
+            keys,
             policy,
             archived: false,
             range: None,
@@ -72,13 +66,8 @@ impl PolicySet {
     }
 
     /// Rebuild the concrete descriptor from the policy template and keys.
-    pub fn to_descriptor(&self) -> Result<Descriptor<DescriptorPublicKey>, Error> {
-        let template = Descriptor::from_str(&self.policy).map_err(|_| Error::WalletPolicy)?;
-        WalletPolicy {
-            template,
-            key_info: self.keys.clone(),
-        }
-        .into_descriptor()
+    pub fn to_descriptor(&self) -> Result<Descriptor, Error> {
+        Active::from_wallet_policy(&self.policy, &self.keys)
     }
 }
 
@@ -109,7 +98,7 @@ pub fn parse_policy_backup(bytes: &[u8]) -> Result<PolicyBackup, Error> {
 
 /// Root pubkey of a key info entry. Bare xpubs are valid here, so this goes through
 /// `dpk_to_root_pk` rather than the encoding-side `dpk_to_pk`.
-fn key_root(key: &DescriptorPublicKey) -> Result<secp256k1::PublicKey, Error> {
+fn key_root(key: &DescriptorKey) -> Result<PublicKey, Error> {
     crate::descriptor::dpk_to_root_pk(key).map_err(|_| Error::DescriptorBackup)
 }
 
@@ -127,7 +116,7 @@ impl PolicyBackup {
             if set
                 .keys
                 .iter()
-                .any(|k| matches!(k, DescriptorPublicKey::Single(_)))
+                .any(|k| matches!(Active::classify(k), KeyExpr::Literal { .. }))
             {
                 return Err(Error::DescriptorBackup);
             }
@@ -156,7 +145,7 @@ impl PolicyBackup {
         serde_json::to_vec(&self.policy_sets[0]).map_err(|_| Error::DescriptorBackup)
     }
 
-    fn all_keys(&self) -> impl Iterator<Item = &DescriptorPublicKey> {
+    fn all_keys(&self) -> impl Iterator<Item = &DescriptorKey> {
         self.policy_sets.iter().flat_map(|set| set.keys.iter())
     }
 }
@@ -174,7 +163,7 @@ impl ToPayload for PolicyBackup {
         Content::Bip388
     }
 
-    fn key_derivation_paths(&self) -> Result<Vec<(secp256k1::PublicKey, DerivationPath)>, Error> {
+    fn key_derivation_paths(&self) -> Result<Vec<(PublicKey, DerivationPath)>, Error> {
         let mut key_paths = BTreeSet::new();
         for key in self.all_keys() {
             if let Some(path) = dpk_to_deriv_path(key) {
@@ -184,7 +173,7 @@ impl ToPayload for PolicyBackup {
         Ok(key_paths.into_iter().collect())
     }
 
-    fn keys(&self) -> Result<Vec<secp256k1::PublicKey>, Error> {
+    fn keys(&self) -> Result<Vec<PublicKey>, Error> {
         // Never seed encryption from an unvalidated policy: a placeholder with no
         // trailing derivation/wildcard would put the seeding root on-chain.
         self.validate()?;
@@ -196,10 +185,9 @@ impl ToPayload for PolicyBackup {
     }
 
     fn warnings(&self) -> Result<Vec<Warning>, Error> {
-        let nums_xonly = bip341_nums().x_only_public_key().0;
         let mut warnings = Vec::new();
         for key in self.all_keys() {
-            if key_root(key)?.x_only_public_key().0 == nums_xonly {
+            if Active::xonly(&key_root(key)?) == BIP341_NUMS {
                 let w = Warning::NumsKey(key.clone());
                 if !warnings.contains(&w) {
                     warnings.push(w);
@@ -226,8 +214,8 @@ mod tests {
     const KEY1: &str = "[b2b1f0cf/48'/0'/0'/2']xpub6EWhjpPa6FqrcaPBuGBZRJVjzGJ1ZsMygRF26RwN932Vfkn1gyCiTbECVitBjRCkexEvetLdiqzTcYimmzYxyR1BZ79KNevgt61PDcukmC7";
     const KEY_PKH: &str = "[d34db33f/44'/0'/0']xpub6ERApfZwUNrhLCkDtcHTcxd75RbzS1ed54G1LkBUHQVHQKqhMkhgbmJbZRkrgZw4koxb5JaHWkY4ALHY2grBGRjaDMzQLcgJvLJuZZvRcEL";
 
-    fn key(s: &str) -> DescriptorPublicKey {
-        DescriptorPublicKey::from_str(s).unwrap()
+    fn key(s: &str) -> DescriptorKey {
+        DescriptorKey::from_str(s).unwrap()
     }
 
     fn single() -> PolicyBackup {
@@ -419,7 +407,7 @@ mod tests {
 
     #[test]
     fn policy_set_descriptor_roundtrip() {
-        let descriptor = Descriptor::<DescriptorPublicKey>::from_str(
+        let descriptor = Descriptor::from_str(
             "wsh(sortedmulti(2,[6738736c/48'/0'/0'/2']xpub6FC1fXFP1GXLX5TKtcjHGT4q89SDRehkQLtbKJ2PzWcvbBHtyDsJPLtpLtkGqYNYZdVVAjRQ5kug9CsapegmmeRutpP7PW4u4wVF9JfkDhw/<0;1>/*,[b2b1f0cf/48'/0'/0'/2']xpub6EWhjpPa6FqrcaPBuGBZRJVjzGJ1ZsMygRF26RwN932Vfkn1gyCiTbECVitBjRCkexEvetLdiqzTcYimmzYxyR1BZ79KNevgt61PDcukmC7/<0;1>/*))",
         )
         .unwrap();

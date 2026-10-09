@@ -15,7 +15,7 @@ path = "src/lib.rs"
 
 [workspace]
 members = ["bip138-ll"]
-exclude = ["fuzz"]
+exclude = ["fuzz", "examples"]
 
 [dependencies]
 # Dependency-free wire format and crypto core. The `rust-bitcoin` provider is
@@ -29,8 +29,7 @@ base64 = {version = "0.22", default-features = false, features = ["alloc"], opti
 bitcoin-encrypted-backup-v0 = { version = "0.0.2", package = "bitcoin-encrypted-backup", default-features = false, optional = true }
 
 #miniscript
-mscript_12_3_5 = { version = "12.3.5", default-features = false, features = ["serde", "no-std"], package = "miniscript" , optional = true}
-mscript_12_0 = { version = "12.0", default-features = false, features = ["serde", "no-std"], package = "miniscript" , optional = true}
+mscript_12 = { version = "12.0", default-features = false, features = ["serde", "no-std"], package = "miniscript" , optional = true}
 
 # devices
 async-hwi = { git = "https://github.com/wizardsardine/async-hwi", rev = "b7d924a0df5eeec7cdf0e03d7eb77bf48226fcb5", optional = true }
@@ -59,10 +58,10 @@ default = ["miniscript_latest", "rand", "base64", "v0", "descriptor_backup"]
 rand = ["bip138-ll/os-rng"]
 base64 = ["dep:base64"]
 v0 = ["dep:bitcoin-encrypted-backup-v0"]
-miniscript_latest = ["miniscript_12_3_5"]
-miniscript_12_3_5 = ["mscript_12_3_5", "bitcoin-encrypted-backup-v0?/miniscript_12_3_5"]
-miniscript_12_0 = ["mscript_12_0", "bitcoin-encrypted-backup-v0?/miniscript_12_0"]
+miniscript_latest = ["miniscript_12"]
+miniscript_12 = ["mscript_12", "bitcoin-encrypted-backup-v0?/miniscript_12_0"]
 tokio = ["dep:tokio"]
 devices = ["dep:async-hwi", "tokio"]
 descriptor_backup = ["dep:serde", "dep:serde_json"]
-cli = ["dep:clap", "tokio", "miniscript_latest", "rand", "descriptor_backup"]
+# no backend forced, so the bin builds on any of them
+cli = ["dep:clap", "tokio", "rand", "descriptor_backup"]

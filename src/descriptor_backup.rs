@@ -11,13 +11,10 @@ use serde::{Deserialize, Serialize};
 
 use crate::{
     Content, Decrypted, Error, ToPayload, Warning,
+    backend::{Active, Backend, DerivationPath, Descriptor, PublicKey},
     descriptor::{
         descr_exposed_keys, descr_to_dpks, descr_warnings, dpks_to_derivation_keys_paths,
         dpks_to_key_paths,
-    },
-    miniscript::{
-        Descriptor, DescriptorPublicKey,
-        bitcoin::{bip32::DerivationPath, secp256k1},
     },
 };
 
@@ -35,9 +32,9 @@ pub struct DescriptorBackup {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DescriptorSet {
-    pub descriptor: Descriptor<DescriptorPublicKey>,
+    pub descriptor: Descriptor,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub change_descriptor: Option<Descriptor<DescriptorPublicKey>>,
+    pub change_descriptor: Option<Descriptor>,
     #[serde(default, skip_serializing_if = "core::ops::Not::not")]
     pub archived: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -67,7 +64,7 @@ impl DescriptorBackup {
             return Err(Error::DescriptorBackup);
         }
         for set in &self.descriptor_sets {
-            if set.descriptor.is_multipath() && set.change_descriptor.is_some() {
+            if Active::is_multipath(&set.descriptor) && set.change_descriptor.is_some() {
                 return Err(Error::DescriptorBackup);
             }
         }
@@ -80,7 +77,7 @@ impl DescriptorBackup {
     }
 
     /// Every descriptor and change_descriptor across all sets.
-    fn descriptors(&self) -> impl Iterator<Item = &Descriptor<DescriptorPublicKey>> {
+    fn descriptors(&self) -> impl Iterator<Item = &Descriptor> {
         self.descriptor_sets
             .iter()
             .flat_map(|set| core::iter::once(&set.descriptor).chain(set.change_descriptor.as_ref()))
@@ -96,7 +93,7 @@ impl ToPayload for DescriptorBackup {
         Content::Bip380
     }
 
-    fn key_derivation_paths(&self) -> Result<Vec<(secp256k1::PublicKey, DerivationPath)>, Error> {
+    fn key_derivation_paths(&self) -> Result<Vec<(PublicKey, DerivationPath)>, Error> {
         let mut key_paths = BTreeSet::new();
         for descriptor in self.descriptors() {
             key_paths.extend(dpks_to_key_paths(&descr_to_dpks(descriptor)));
@@ -104,7 +101,7 @@ impl ToPayload for DescriptorBackup {
         Ok(key_paths.into_iter().collect())
     }
 
-    fn keys(&self) -> Result<Vec<secp256k1::PublicKey>, Error> {
+    fn keys(&self) -> Result<Vec<PublicKey>, Error> {
         let mut keys = BTreeSet::new();
         for descriptor in self.descriptors() {
             let dpks = descr_to_dpks(descriptor);
@@ -151,8 +148,8 @@ mod tests {
     const RECEIVE: &str = "wpkh([d34db33f/84h/1h/0h]tpubDC5FSnBiZDMmhiuCmWAYsLwgLYrrT9rAqvTySfuCCrgsWz8wxMXUS9Tb9iVMvcRbvFcAHGkMD5Kx8koh4GquNGNTfohfk7pgjhaPCdXpoba/0/*)";
     const CHANGE: &str = "wpkh([d34db33f/84h/1h/0h]tpubDC5FSnBiZDMmhiuCmWAYsLwgLYrrT9rAqvTySfuCCrgsWz8wxMXUS9Tb9iVMvcRbvFcAHGkMD5Kx8koh4GquNGNTfohfk7pgjhaPCdXpoba/1/*)";
 
-    fn descr(s: &str) -> Descriptor<DescriptorPublicKey> {
-        Descriptor::<DescriptorPublicKey>::from_str(s).unwrap()
+    fn descr(s: &str) -> Descriptor {
+        Descriptor::from_str(s).unwrap()
     }
 
     #[test]

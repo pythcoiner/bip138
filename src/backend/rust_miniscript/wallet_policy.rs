@@ -2,14 +2,15 @@
 //! wallet policy, behind the `descriptor_backup` feature.
 //!
 //! A wallet policy is a descriptor template with `@i` key placeholders plus a
-//! key information vector of `[origin]xpub` entries. miniscript 12.3.5 has no
+//! key information vector of `[origin]xpub` entries. miniscript has no
 //! BIP388 parser, so this backports miniscript master's approach onto its
 //! public API: a [`Bip388Key`] placeholder that implements [`MiniscriptKey`],
 //! `FromStr` and `Display`, so `Descriptor<Bip388Key>` parses and serializes
 //! the template through miniscript's own machinery. Conversion is then just
 //! `Bip388Key <-> DescriptorPublicKey` driven by `Descriptor::translate_pk`.
 //!
-//! musig placeholders are out of scope: miniscript 12.x cannot parse them.
+//! musig placeholders are out of scope: the supported miniscript releases cannot
+//! parse them.
 
 use alloc::{
     string::{String, ToString},
@@ -21,17 +22,18 @@ use core::{
     str::FromStr,
 };
 
+#[cfg(feature = "miniscript_12")]
+use crate::miniscript::TranslatePk;
 use crate::{
     Error,
     miniscript::{
-        Descriptor, DescriptorPublicKey, ForEachKey, MiniscriptKey, TranslateErr, TranslatePk,
-        Translator,
+        Descriptor, DescriptorPublicKey, ForEachKey, MiniscriptKey, TranslateErr, Translator,
         bitcoin::{
             bip32::DerivationPath,
             hashes::{hash160, ripemd160, sha256},
         },
         descriptor::{DerivPaths, DescriptorMultiXKey, DescriptorXKey, Wildcard},
-        hash256,
+        hash256, translate_hash_clone,
     },
 };
 
@@ -195,8 +197,10 @@ struct KeySet {
     keys: Vec<DescriptorPublicKey>,
 }
 
-impl Translator<DescriptorPublicKey, Bip388Key, Error> for KeySet {
-    fn pk(&mut self, dpk: &DescriptorPublicKey) -> Result<Bip388Key, Error> {
+impl KeySet {
+    /// Placeholder for a key expression, adding its root to the key info vector
+    /// when it is not there yet.
+    fn placeholder(&mut self, dpk: &DescriptorPublicKey) -> Result<Bip388Key, Error> {
         let root = key_root(dpk)?;
         let index = match self.keys.iter().position(|k| *k == root) {
             Some(i) => i,
@@ -213,22 +217,8 @@ impl Translator<DescriptorPublicKey, Bip388Key, Error> for KeySet {
         })
     }
 
-    fn sha256(&mut self, h: &sha256::Hash) -> Result<sha256::Hash, Error> {
-        Ok(*h)
-    }
-    fn hash256(&mut self, h: &hash256::Hash) -> Result<hash256::Hash, Error> {
-        Ok(*h)
-    }
-    fn ripemd160(&mut self, h: &ripemd160::Hash) -> Result<ripemd160::Hash, Error> {
-        Ok(*h)
-    }
-    fn hash160(&mut self, h: &hash160::Hash) -> Result<hash160::Hash, Error> {
-        Ok(*h)
-    }
-}
-
-impl Translator<Bip388Key, DescriptorPublicKey, Error> for KeySet {
-    fn pk(&mut self, key: &Bip388Key) -> Result<DescriptorPublicKey, Error> {
+    /// Key expression a placeholder stands for, resolved against the key info vector.
+    fn resolve(&self, key: &Bip388Key) -> Result<DescriptorPublicKey, Error> {
         let root = self
             .keys
             .get(key.index as usize)
@@ -256,19 +246,23 @@ impl Translator<Bip388Key, DescriptorPublicKey, Error> for KeySet {
         };
         Ok(dpk)
     }
+}
 
-    fn sha256(&mut self, h: &sha256::Hash) -> Result<sha256::Hash, Error> {
-        Ok(*h)
+// miniscript 12 takes the target key and error as trait parameters.
+#[cfg(feature = "miniscript_12")]
+impl Translator<DescriptorPublicKey, Bip388Key, Error> for KeySet {
+    fn pk(&mut self, dpk: &DescriptorPublicKey) -> Result<Bip388Key, Error> {
+        self.placeholder(dpk)
     }
-    fn hash256(&mut self, h: &hash256::Hash) -> Result<hash256::Hash, Error> {
-        Ok(*h)
+    translate_hash_clone!(DescriptorPublicKey, Bip388Key, Error);
+}
+
+#[cfg(feature = "miniscript_12")]
+impl Translator<Bip388Key, DescriptorPublicKey, Error> for KeySet {
+    fn pk(&mut self, key: &Bip388Key) -> Result<DescriptorPublicKey, Error> {
+        self.resolve(key)
     }
-    fn ripemd160(&mut self, h: &ripemd160::Hash) -> Result<ripemd160::Hash, Error> {
-        Ok(*h)
-    }
-    fn hash160(&mut self, h: &hash160::Hash) -> Result<hash160::Hash, Error> {
-        Ok(*h)
-    }
+    translate_hash_clone!(Bip388Key, DescriptorPublicKey, Error);
 }
 
 impl<E> From<TranslateErr<E>> for Error
@@ -410,7 +404,7 @@ mod tests {
             key_info: Vec<String>,
             descriptor: String,
         }
-        const VECTORS: &str = include_str!("../test_vectors/bip388_wallet_policy.json");
+        const VECTORS: &str = include_str!("../../../test_vectors/bip388_wallet_policy.json");
         let vectors: Vec<Vector> = serde_json::from_str(VECTORS).unwrap();
         assert!(!vectors.is_empty());
         for v in vectors {
