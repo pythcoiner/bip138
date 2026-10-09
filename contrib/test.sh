@@ -10,6 +10,10 @@ cargo test --no-default-features --features "miniscript_latest rand base64 v0" -
 cargo test --features cli --verbose --color always -- --nocapture
 # device support is feature gated too, and its tests need no device
 cargo test --features "cli devices" --verbose --color always -- --nocapture
+# the miniscript 13 backend, with and without the beb bin (v0 is 12-only)
+cargo test --no-default-features --features "miniscript_13 rand base64 descriptor_backup" --verbose --color always -- --nocapture
+cargo test --no-default-features --features "miniscript_13 rand base64 descriptor_backup cli" --verbose --color always -- --nocapture
 # downstream crates built against each miniscript backend
 cargo run --manifest-path examples/miniscript_12_0/Cargo.toml
 cargo run --manifest-path examples/miniscript_12_3_5/Cargo.toml
+cargo run --manifest-path examples/miniscript_13_0/Cargo.toml

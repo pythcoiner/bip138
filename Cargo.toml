@@ -30,6 +30,7 @@ bitcoin-encrypted-backup-v0 = { version = "0.0.2", package = "bitcoin-encrypted-
 
 #miniscript
 mscript_12 = { version = "12.0", default-features = false, features = ["serde", "no-std"], package = "miniscript" , optional = true}
+mscript_13 = { version = "13", package = "miniscript", default-features = false, features = ["serde"], optional = true }
 
 # devices
 async-hwi = { git = "https://github.com/wizardsardine/async-hwi", rev = "b7d924a0df5eeec7cdf0e03d7eb77bf48226fcb5", optional = true }
@@ -60,6 +61,7 @@ base64 = ["dep:base64"]
 v0 = ["dep:bitcoin-encrypted-backup-v0"]
 miniscript_latest = ["miniscript_12"]
 miniscript_12 = ["mscript_12", "bitcoin-encrypted-backup-v0?/miniscript_12_0"]
+miniscript_13 = ["mscript_13"]
 tokio = ["dep:tokio"]
 devices = ["dep:async-hwi", "tokio"]
 descriptor_backup = ["dep:serde", "dep:serde_json"]

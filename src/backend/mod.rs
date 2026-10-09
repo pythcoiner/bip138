@@ -14,13 +14,21 @@ use core::{
 use crate::Error;
 use crate::ll;
 
-#[cfg(not(feature = "miniscript_12"))]
+#[cfg(all(feature = "miniscript_12", feature = "miniscript_13"))]
+compile_error!("A single miniscript backend must be selected");
+
+#[cfg(not(any(feature = "miniscript_12", feature = "miniscript_13")))]
 compile_error!("A miniscript backend must be selected with a feature flag");
+
+#[cfg(all(feature = "v0", feature = "miniscript_13"))]
+compile_error!("The v0 fallback only supports the miniscript 12 backend");
 
 // The miniscript release the backend is built on, for callers that need its
 // concrete types (xpubs, networks).
 #[cfg(feature = "miniscript_12")]
 pub use mscript_12 as miniscript;
+#[cfg(feature = "miniscript_13")]
+pub use mscript_13 as miniscript;
 
 pub mod rust_miniscript;
 

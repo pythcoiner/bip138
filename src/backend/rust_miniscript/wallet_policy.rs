@@ -265,6 +265,29 @@ impl Translator<Bip388Key, DescriptorPublicKey, Error> for KeySet {
     translate_hash_clone!(Bip388Key, DescriptorPublicKey, Error);
 }
 
+// miniscript 13 takes the target key and error as associated types.
+#[cfg(feature = "miniscript_13")]
+impl Translator<DescriptorPublicKey> for KeySet {
+    type TargetPk = Bip388Key;
+    type Error = Error;
+
+    fn pk(&mut self, dpk: &DescriptorPublicKey) -> Result<Bip388Key, Error> {
+        self.placeholder(dpk)
+    }
+    translate_hash_clone!(DescriptorPublicKey);
+}
+
+#[cfg(feature = "miniscript_13")]
+impl Translator<Bip388Key> for KeySet {
+    type TargetPk = DescriptorPublicKey;
+    type Error = Error;
+
+    fn pk(&mut self, key: &Bip388Key) -> Result<DescriptorPublicKey, Error> {
+        self.resolve(key)
+    }
+    translate_hash_clone!(Bip388Key);
+}
+
 impl<E> From<TranslateErr<E>> for Error
 where
     Error: From<E>,
@@ -306,7 +329,17 @@ fn check_key_order(template: &Descriptor<Bip388Key>) -> Result<(), Error> {
 impl WalletPolicy {
     /// Build a wallet policy from a concrete descriptor.
     pub fn from_descriptor(d: &Descriptor<DescriptorPublicKey>) -> Result<Self, Error> {
+        // Index the key roots in descriptor order first: miniscript 13 translates
+        // right to left, which would number the placeholders backwards.
         let mut translator = KeySet { keys: vec![] };
+        d.for_each_key(|dpk| {
+            if let Ok(root) = key_root(dpk)
+                && !translator.keys.contains(&root)
+            {
+                translator.keys.push(root);
+            }
+            true
+        });
         let template = d.translate_pk(&mut translator)?;
         check_key_order(&template)?;
         Ok(WalletPolicy {
