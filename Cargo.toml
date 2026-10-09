@@ -7,7 +7,7 @@ description = "BIP138 Compact encryption scheme for Non-seed wallet data"
 license = "MIT"
 repository = "https://github.com/pythcoiner/bip138"
 documentation = "https://docs.rs/bip138"
-include = ["Cargo.toml", "LICENSE", "README.md", "src/lib.rs"]
+include = ["Cargo.toml", "LICENSE", "README.md", "src/**/*.rs"]
 publish = true
 
 [lib]
