@@ -16,9 +16,6 @@ pub use ll::{Content, Encryption, Padding, Version};
 #[cfg(feature = "descriptor_backup")]
 pub use policy_backup::{PolicyBackup, PolicySet, parse_policy_backup};
 
-#[cfg(feature = "tokio")]
-pub use tokio;
-
 pub mod backend;
 pub mod descriptor;
 #[cfg(feature = "descriptor_backup")]

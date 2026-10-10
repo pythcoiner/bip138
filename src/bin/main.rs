@@ -232,8 +232,7 @@ fn read_stdin_args(reader: impl BufRead) -> Result<Vec<OsString>, CliError> {
     Ok(args)
 }
 
-#[tokio::main]
-async fn main() -> Result<(), CliError> {
+fn main() -> Result<(), CliError> {
     let Cli { command, output } = parse_cli()?;
 
     // Handle the specific subcommand
@@ -318,7 +317,7 @@ async fn main() -> Result<(), CliError> {
                     let mut keys = backup.get_keys();
                     let path = device_path(path)?;
                     let (key, device_path) =
-                        fetch_encryption_device_key(deriv_paths.clone(), path).await?;
+                        fetch_encryption_device_key(deriv_paths.clone(), path)?;
                     if !used_deriv_paths.contains(&device_path) {
                         used_deriv_paths.push(device_path.clone());
                     }
@@ -451,14 +450,15 @@ async fn main() -> Result<(), CliError> {
                 } else {
                     Network::Bitcoin
                 };
-                let fetch = async move {
+                let prompt = *prompt;
+                let _ = std::thread::spawn(move || {
                     if !fetch_stop.load(Ordering::SeqCst) {
                         let key_tx = fetch_key_tx.clone();
                         let send_stop = fetch_stop.clone();
                         let stop = fetch_stop.clone();
                         match bip138::signing_devices::XpubCollector::new(deriv_paths, network)
                             .ordering([48, 84, 86])
-                            .prompt(*prompt)
+                            .prompt(prompt)
                             .collect_until(
                                 // stderr, so it never mixes into the descriptor on stdout
                                 fetch_log_to_stderr,
@@ -468,9 +468,7 @@ async fn main() -> Result<(), CliError> {
                                     }
                                 },
                                 move || stop.load(Ordering::SeqCst),
-                            )
-                            .await
-                        {
+                            ) {
                             Ok(xpubs) => {
                                 for warning in xpubs.warnings {
                                     print_xpub_warning(warning);
@@ -483,27 +481,15 @@ async fn main() -> Result<(), CliError> {
                             }
                         }
                     }
-                };
+                });
 
                 drop(key_tx);
                 drop(document_tx);
-                let document = tokio::task::spawn_blocking(move || document_rx.recv());
-                tokio::pin!(document);
-                tokio::pin!(fetch);
-                tokio::select! {
-                    document = &mut document => {
-                        stop.store(true, Ordering::SeqCst);
-                        document
-                            .map_err(|_| CliError::NoKeys)?
-                            .map_err(|_| CliError::NoKeys)??
-                    }
-                    _ = &mut fetch => {
-                        document
-                            .await
-                            .map_err(|_| CliError::NoKeys)?
-                            .map_err(|_| CliError::NoKeys)??
-                    }
-                }
+                // a device call may still be pending on the fetch thread: it is
+                // left behind once a document is in
+                let document = document_rx.recv().map_err(|_| CliError::NoKeys);
+                stop.store(true, Ordering::SeqCst);
+                document??
             };
 
             #[cfg(not(feature = "devices"))]
@@ -595,7 +581,6 @@ async fn main() -> Result<(), CliError> {
                 network,
                 fetch_log_to_stderr,
             )
-            .await
             .map_err(CliError::FailedToFetchXpub)?
             .ok_or(CliError::NoKeys)?;
 
@@ -651,7 +636,7 @@ fn origin_xpub(
 }
 
 #[cfg(feature = "devices")]
-async fn fetch_encryption_device_key(
+fn fetch_encryption_device_key(
     deriv_paths: Vec<DerivationPath>,
     path: Option<DerivationPath>,
 ) -> Result<(PublicKey, DerivationPath), CliError> {
@@ -672,7 +657,6 @@ async fn fetch_encryption_device_key(
                 eprintln!("warning: cannot flush stdout: {err:?}");
             }
         })
-        .await
         .map_err(CliError::FailedToFetchXpub)?
         .map(|xpub| (xpub.public_key, path))
         .ok_or(CliError::NoKeys);
@@ -699,7 +683,6 @@ async fn fetch_encryption_device_key(
             },
             move || read_stop.load(Ordering::SeqCst),
         )
-        .await
         .map_err(CliError::FailedToFetchXpub)?;
 
     for warning in xpubs.warnings {

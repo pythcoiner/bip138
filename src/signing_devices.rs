@@ -5,12 +5,15 @@ use crate::{
         bip32::{self, DerivationPath, Fingerprint},
     },
 };
-use async_hwi::{
-    DeviceKind, HWI,
-    bitbox::{BitBox02, PairingBitbox02, api::runtime},
+use bwk_hwi::{
+    DeviceKind, Error as HwiError, HWI,
+    bitbox::{
+        BitBox02, PairingBitbox02,
+        api::{noise::PersistedNoiseConfig, usb::is_bitbox02},
+    },
     coldcard,
     jade::{self, Jade},
-    ledger::{HidApi, Ledger, LedgerSimulator, TransportHID},
+    ledger::{Ledger, LedgerSimulator, TransportHID, hidapi::HidApi},
     specter::{Specter, SpecterSimulator},
 };
 use core::fmt::Display;
@@ -20,8 +23,13 @@ use std::{
     error::Error as StdError,
     fs,
     path::PathBuf,
+    sync::{
+        Arc,
+        mpsc::{self, RecvTimeoutError},
+    },
+    thread,
+    time::Duration,
 };
-use tokio::time::{Duration, timeout};
 
 const HARDENED_BIT: u32 = 1 << 31;
 const PROMPT_TIMEOUT: Duration = Duration::from_secs(60);
@@ -124,15 +132,15 @@ impl XpubCollector {
         self
     }
 
-    pub async fn collect<L, X>(self, log: L, on_xpub: X) -> Result<XpubCollection, FetchFailed>
+    pub fn collect<L, X>(self, log: L, on_xpub: X) -> Result<XpubCollection, FetchFailed>
     where
         L: FnMut(String) + Send,
         X: FnMut(DerivationPath, bip32::Xpub) + Send,
     {
-        self.collect_until(log, on_xpub, || false).await
+        self.collect_until(log, on_xpub, || false)
     }
 
-    pub async fn collect_until<L, X, S>(
+    pub fn collect_until<L, X, S>(
         self,
         mut log: L,
         mut on_xpub: X,
@@ -145,12 +153,12 @@ impl XpubCollector {
     {
         let mut xpubs = BTreeSet::new();
         let mut warnings = vec![];
-        if let Ok(devices) = list(self.network).await {
+        if let Ok(devices) = list(self.network) {
             if let Some(device) = devices.into_iter().next() {
                 let device_kind = device.device_kind();
                 let paths = self.paths(device_kind);
                 log(format!("Fetching xpubs on {device_kind:?}"));
-                unlock_bitbox(&*device, self.network, &mut log).await?;
+                unlock_bitbox(&device, self.network, &mut log)?;
                 for (path, expect) in &paths {
                     if should_stop() {
                         break;
@@ -160,7 +168,7 @@ impl XpubCollector {
                         "Fetching {path} on {device_kind:?} with {expect:?} timeout {fetch_timeout:?}"
                     ));
                     device.display(display_xpub(device_kind, *expect));
-                    match timeout(fetch_timeout, device.get_extended_pubkey(path)).await {
+                    match get_extended_pubkey(&device, path, fetch_timeout) {
                         Ok(Ok(xpub)) => {
                             xpubs.insert(xpub);
                             on_xpub(path.clone(), xpub);
@@ -262,7 +270,7 @@ impl Expect {
     }
 }
 
-pub async fn collect_xpubs<F>(
+pub fn collect_xpubs<F>(
     deriv_paths: Vec<DerivationPath>,
     network: Network,
     mut log: F,
@@ -270,12 +278,10 @@ pub async fn collect_xpubs<F>(
 where
     F: FnMut(String) + Send,
 {
-    XpubCollector::new(deriv_paths, network)
-        .collect(&mut log, |_, _| {})
-        .await
+    XpubCollector::new(deriv_paths, network).collect(&mut log, |_, _| {})
 }
 
-pub async fn fetch_first_xpub_at_path<F>(
+pub fn fetch_first_xpub_at_path<F>(
     path: DerivationPath,
     network: Network,
     log: F,
@@ -283,12 +289,10 @@ pub async fn fetch_first_xpub_at_path<F>(
 where
     F: FnMut(String) + Send,
 {
-    Ok(fetch_first_origin_xpub_at_path(path, network, log)
-        .await?
-        .map(|fetched| fetched.xpub))
+    Ok(fetch_first_origin_xpub_at_path(path, network, log)?.map(|fetched| fetched.xpub))
 }
 
-pub async fn fetch_first_origin_xpub_at_path<F>(
+pub fn fetch_first_origin_xpub_at_path<F>(
     path: DerivationPath,
     network: Network,
     mut log: F,
@@ -296,26 +300,23 @@ pub async fn fetch_first_origin_xpub_at_path<F>(
 where
     F: FnMut(String) + Send,
 {
-    if let Ok(devices) = list(network).await {
+    if let Ok(devices) = list(network) {
         if let Some(device) = devices.into_iter().next() {
             let device_kind = device.device_kind();
             let expect = fetch_path_expect(device_kind, network, &path);
             log(format!("Fetching xpubs on {device_kind:?}"));
-            unlock_bitbox(&*device, network, &mut log).await?;
-            let fingerprint = device
-                .get_master_fingerprint()
-                .await
-                .map_err(|e| FetchFailed {
-                    device: device_kind,
-                    path: path.clone(),
-                    expect,
-                    error: e.to_string(),
-                })?;
+            unlock_bitbox(&device, network, &mut log)?;
+            let fingerprint = device.get_master_fingerprint().map_err(|e| FetchFailed {
+                device: device_kind,
+                path: path.clone(),
+                expect,
+                error: e.to_string(),
+            })?;
             log(format!(
                 "Fetching {path} on {device_kind:?} with {expect:?} timeout {PROMPT_TIMEOUT:?}"
             ));
             device.display(display_xpub(device_kind, expect));
-            return match timeout(PROMPT_TIMEOUT, device.get_extended_pubkey(&path)).await {
+            return match get_extended_pubkey(&device, &path, PROMPT_TIMEOUT) {
                 Ok(Ok(xpub)) => Ok(Some(FetchedXpub { fingerprint, xpub })),
                 Ok(Err(e)) => Err(FetchFailed {
                     device: device_kind,
@@ -378,8 +379,8 @@ fn common_derivation_path_expect(kind: DeviceKind, path: &DerivationPath) -> Exp
     }
 }
 
-async fn unlock_bitbox<L>(
-    device: &(dyn HWI + Send),
+fn unlock_bitbox<L>(
+    device: &Arc<dyn HWI + Send + Sync>,
     network: Network,
     log: &mut L,
 ) -> Result<(), FetchFailed>
@@ -394,7 +395,7 @@ where
     log(format!(
         "Unlocking BitBox02 with {path} timeout {PROMPT_TIMEOUT:?}"
     ));
-    match timeout(PROMPT_TIMEOUT, device.get_extended_pubkey(&path)).await {
+    match get_extended_pubkey(device, &path, PROMPT_TIMEOUT) {
         Ok(Ok(_)) => {
             log("BitBox02 unlocked".to_string());
             Ok(())
@@ -426,59 +427,81 @@ fn path_purpose(path: &DerivationPath) -> Option<u32> {
     path.to_u32_vec().first().map(|index| index & !HARDENED_BIT)
 }
 
-pub async fn list(network: Network) -> Result<Vec<Box<dyn HWI + Send>>, Box<dyn StdError>> {
-    let mut hws = Vec::new();
+struct TimedOut;
 
-    if let Ok(device) = SpecterSimulator::try_connect().await {
-        hws.push(device.into());
+/// Fetches an xpub on its own thread, waiting at most `limit`. A timed-out call
+/// cannot be cancelled: it keeps running on its thread.
+fn get_extended_pubkey(
+    device: &Arc<dyn HWI + Send + Sync>,
+    path: &DerivationPath,
+    limit: Duration,
+) -> Result<Result<bip32::Xpub, HwiError>, TimedOut> {
+    let (tx, rx) = mpsc::channel();
+    let device = device.clone();
+    let path = path.clone();
+    thread::spawn(move || {
+        let _ = tx.send(device.get_extended_pubkey(&path));
+    });
+    match rx.recv_timeout(limit) {
+        Ok(result) => Ok(result),
+        Err(RecvTimeoutError::Timeout) => Err(TimedOut),
+        Err(RecvTimeoutError::Disconnected) => {
+            Ok(Err(HwiError::Unexpected("device call panicked")))
+        }
+    }
+}
+
+pub fn list(network: Network) -> Result<Vec<Arc<dyn HWI + Send + Sync>>, Box<dyn StdError>> {
+    let mut hws: Vec<Arc<dyn HWI + Send + Sync>> = Vec::new();
+
+    if let Ok(device) = SpecterSimulator::try_connect() {
+        hws.push(Arc::new(device));
     }
 
-    if let Ok(devices) = Specter::enumerate().await {
+    if let Ok(devices) = Specter::enumerate() {
         for device in devices {
-            hws.push(device.into());
+            hws.push(Arc::new(device));
         }
     }
 
-    match Jade::enumerate().await {
+    match Jade::enumerate() {
         Err(e) => println!("{e:?}"),
         Ok(devices) => {
             for device in devices {
                 let device = device.with_network(network);
-                if let Ok(info) = device.get_info().await {
+                if let Ok(info) = device.get_info() {
                     if info.jade_state == jade::api::JadeState::Locked {
-                        if let Err(e) = device.auth().await {
+                        if let Err(e) = device.auth() {
                             eprintln!("auth {e:?}");
                             continue;
                         }
                     }
 
-                    hws.push(device.into());
+                    hws.push(Arc::new(device));
                 }
             }
         }
     }
 
-    if let Ok(device) = LedgerSimulator::try_connect().await {
-        hws.push(device.into());
+    if let Ok(device) = LedgerSimulator::try_connect() {
+        hws.push(Arc::new(device));
     }
 
-    let api = Box::new(HidApi::new().unwrap());
+    let api = HidApi::new()?;
 
     for device_info in api.device_list() {
-        if async_hwi::bitbox::is_bitbox02(device_info) {
+        if is_bitbox02(device_info) {
             if let Ok(device) = device_info.open_device(&api) {
                 let cache_dir = bitbox_pairing_cache_dir()?;
                 fs::create_dir_all(&cache_dir)?;
                 let cache_dir = cache_dir
                     .to_str()
                     .ok_or("BitBox02 pairing cache path is not UTF-8")?;
-                let cache = Box::new(async_hwi::bitbox::api::PersistedNoiseConfig::new(cache_dir));
-                if let Ok(device) =
-                    PairingBitbox02::<runtime::TokioRuntime>::connect(device, Some(cache)).await
-                {
-                    if let Ok(device) = device.wait_confirm().await {
+                let cache = Box::new(PersistedNoiseConfig::new(cache_dir));
+                if let Ok(device) = PairingBitbox02::connect(device, Some(cache)) {
+                    if let Ok(device) = device.wait_confirm() {
                         let bb02 = BitBox02::from(device).with_network(network);
-                        hws.push(bb02.into());
+                        hws.push(Arc::new(bb02));
                     }
                 }
             }
@@ -487,9 +510,8 @@ pub async fn list(network: Network) -> Result<Vec<Box<dyn HWI + Send>>, Box<dyn 
             && device_info.product_id() == coldcard::api::CKCC_PID
         {
             if let Some(sn) = device_info.serial_number() {
-                if let Ok((cc, _)) = coldcard::api::Coldcard::open(&api, sn, None) {
-                    let hw = coldcard::Coldcard::from(cc);
-                    hws.push(hw.into())
+                if let Ok((cc, _)) = coldcard::api::Coldcard::open(HidApiRef(&api), sn, None) {
+                    hws.push(Arc::new(coldcard::Coldcard::from(cc)));
                 }
             }
         }
@@ -497,11 +519,20 @@ pub async fn list(network: Network) -> Result<Vec<Box<dyn HWI + Send>>, Box<dyn 
 
     for detected in Ledger::<TransportHID>::enumerate(&api) {
         if let Ok(device) = Ledger::<TransportHID>::connect(&api, detected) {
-            hws.push(device.into());
+            hws.push(Arc::new(device));
         }
     }
 
     Ok(hws)
+}
+
+/// `coldcard::api::Coldcard::open` takes an `AsRef<HidApi>`, which `&HidApi` is not.
+struct HidApiRef<'a>(&'a HidApi);
+
+impl AsRef<HidApi> for HidApiRef<'_> {
+    fn as_ref(&self) -> &HidApi {
+        self.0
+    }
 }
 
 #[cfg(target_os = "macos")]

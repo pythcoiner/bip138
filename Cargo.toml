@@ -33,7 +33,7 @@ mscript_12 = { version = "12.0", default-features = false, features = ["serde", 
 mscript_13 = { version = "13", package = "miniscript", default-features = false, features = ["serde"], optional = true }
 
 # devices
-async-hwi = { git = "https://github.com/wizardsardine/async-hwi", rev = "b7d924a0df5eeec7cdf0e03d7eb77bf48226fcb5", optional = true }
+bwk-hwi = { version = "0.1.0", default-features = false, features = ["bitbox", "coldcard", "jade", "ledger", "specter"], optional = true }
 
 # descriptor_backup (std-only document parsing)
 serde = { version = "1.0.228", features = ["derive"], optional = true }
@@ -41,7 +41,6 @@ serde_json = { version = "1.0.145", optional = true }
 
 # cli
 clap = { version = "=4.5.42", features = ["derive"] , optional = true}
-tokio = { version = "1", features = ["macros", "net", "rt", "rt-multi-thread", "io-util", "sync"], optional = true}
 
 [dev-dependencies]
 hex = "0.4.3"
@@ -62,8 +61,7 @@ v0 = ["dep:bitcoin-encrypted-backup-v0"]
 miniscript_latest = ["miniscript_12"]
 miniscript_12 = ["mscript_12", "bitcoin-encrypted-backup-v0?/miniscript_12_0"]
 miniscript_13 = ["mscript_13"]
-tokio = ["dep:tokio"]
-devices = ["dep:async-hwi", "tokio"]
+devices = ["dep:bwk-hwi"]
 descriptor_backup = ["dep:serde", "dep:serde_json"]
 # no backend forced, so the bin builds on any of them
-cli = ["dep:clap", "tokio", "rand", "descriptor_backup"]
+cli = ["dep:clap", "rand", "descriptor_backup"]

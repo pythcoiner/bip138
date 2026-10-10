@@ -24,7 +24,7 @@ From a checkout, `cargo build --bin bip138 --release --features cli` builds it
 in place.
 
 Note: if a signing device supported by
-[`async-hwi`](https://github.com/wizardsardine/async-hwi) is connected and unlocked,
+[`bwk-hwi`](https://docs.rs/bwk-hwi/0.1.0) is connected and unlocked,
 the CLI will automatically try to fetch a set of xpubs from it.
 
 
@@ -166,12 +166,11 @@ Enable the core's `ffi` feature for a hand-written C binding (`bip138_encrypt` /
 | `miniscript_12`     | –       | Compile against `miniscript` 12 (12.0 or later)       |
 | `miniscript_latest` | ✓       | Alias for `miniscript_12`                             |
 | `devices`           | -       | Enable automatic enumeration of signing devices.      |
-| `tokio`             | ✓       | Pull in `tokio` runtime used by the `devices`feature. |
 | `rand`              | ✓       | Enable random nonce generation                        |
 
 Note: the `devices` feature uses
-[`async-hwi`](https://github.com/wizardsardine/async-hwi) crate, see
-[there](https://github.com/wizardsardine/async-hwi) for supported signing devices.
+[`bwk-hwi`](https://docs.rs/bwk-hwi/0.1.0) crate, see
+[there](https://docs.rs/bwk-hwi/0.1.0) for supported signing devices.
 
 ## Regenerating test vectors
 
