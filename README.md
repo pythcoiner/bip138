@@ -161,12 +161,19 @@ Enable the core's `ffi` feature for a hand-written C binding (`bip138_encrypt` /
 
 ## Features
 
-| Feature flag        | Default | Description                                           |
-|---------------------|---------|-------------------------------------------------------|
-| `miniscript_12`     | –       | Compile against `miniscript` 12 (12.0 or later)       |
-| `miniscript_latest` | ✓       | Alias for `miniscript_12`                             |
-| `devices`           | -       | Enable automatic enumeration of signing devices.      |
-| `rand`              | ✓       | Enable random nonce generation                        |
+| Feature flag        | Default | Description                                            |
+|---------------------|---------|--------------------------------------------------------|
+| `miniscript_12`     | –       | Compile against `miniscript` 12 (12.0 or later)        |
+| `miniscript_13`     | –       | Compile against `miniscript` 13 (not with `v0`)        |
+| `miniscript_latest` | ✓       | Alias for `miniscript_12`                              |
+| `rand`              | ✓       | Draw nonces from the OS random source                  |
+| `base64`            | ✓       | Accept and produce base64 encoded backups              |
+| `v0`                | ✓       | Decrypt backups made by bitcoin-encrypted-backup 0.0.2 |
+| `descriptor_backup` | ✓       | Parse BIP380/BIP388 backup documents                   |
+| `devices`           | –       | Fetch xpubs from signing devices                       |
+| `cli`               | –       | Build the `bip138` binary                              |
+
+Select exactly one backend: `miniscript_12` (or `miniscript_latest`) or `miniscript_13`.
 
 Note: the `devices` feature uses
 [`bwk-hwi`](https://docs.rs/bwk-hwi/0.1.0) crate, see
