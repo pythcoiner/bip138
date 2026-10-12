@@ -31,9 +31,15 @@ fn encode_v1_backup_for_test_vectors(
     nonce: [u8; 12],
     decoys: &[[u8; 32]],
 ) -> Result<Vec<u8>, Error> {
-    encode_v1_backup(&RustBitcoin, paths, keys, payload, nonce, |secrets| {
-        pad_individual_secrets_with_decoys(secrets, decoys)
-    })
+    encode_v1_backup(
+        &RustBitcoin,
+        paths,
+        false,
+        keys,
+        payload,
+        nonce,
+        |secrets| pad_individual_secrets_with_decoys(secrets, decoys),
+    )
 }
 
 #[test]
@@ -397,6 +403,7 @@ fn test_encrypt_161_keys_saturates_decoy_bucket() {
         &RustBitcoin,
         &mut OsRandom,
         vec![],
+        false,
         Content::Bip380,
         keys,
         &data,
@@ -491,6 +498,7 @@ fn test_encode_rejects_no_items() {
         let res = encrypt_chacha20_poly1305_v1_items_with_decoys(
             &RustBitcoin,
             vec![],
+            false,
             &[],
             vec![[2; 32]],
             padding,
@@ -746,6 +754,7 @@ fn test_encrypt_sanitizing() {
         &RustBitcoin,
         &mut OsRandom,
         vec![],
+        false,
         Content::Bip380,
         keys,
         &data,
@@ -764,6 +773,7 @@ fn test_encrypt_sanitizing() {
         &RustBitcoin,
         &mut OsRandom,
         vec![],
+        false,
         Content::Bip380,
         keys,
         &data,
@@ -777,6 +787,7 @@ fn test_encrypt_sanitizing() {
         &RustBitcoin,
         &mut OsRandom,
         vec![],
+        false,
         Content::Bip380,
         keys,
         &[],
@@ -796,6 +807,7 @@ fn test_encrypt_sanitizing() {
         &RustBitcoin,
         &mut OsRandom,
         deriv_paths,
+        false,
         Content::Bip380,
         keys,
         &data,
@@ -838,6 +850,7 @@ fn test_basic_encrypt_decrypt() {
         &RustBitcoin,
         &mut OsRandom,
         vec![],
+        false,
         Content::Bip380,
         keys,
         &data,
@@ -898,6 +911,7 @@ fn test_encrypt_excludes_fallback_derivation_paths() {
             fallback_testnet.clone(),
             custom.clone(),
         ],
+        false,
         Content::Bip380,
         keys,
         &data,
@@ -912,6 +926,39 @@ fn test_encrypt_excludes_fallback_derivation_paths() {
 }
 
 #[test]
+fn test_encrypt_stores_fallback_derivation_paths() {
+    let keys = vec![pk1()];
+    let data = "test".as_bytes().to_vec();
+    let fallback_bitcoin = parse_path("84h/0h/0h");
+    let fallback_testnet = parse_path("87h/1h/9h");
+    let custom = parse_path("8/9");
+
+    let bytes = encrypt_chacha20_poly1305_v1(
+        &RustBitcoin,
+        &mut OsRandom,
+        vec![
+            fallback_testnet.clone(),
+            fallback_bitcoin.clone(),
+            custom.clone(),
+            fallback_bitcoin.clone(),
+        ],
+        true,
+        Content::Bip380,
+        keys,
+        &data,
+        Padding::None,
+    )
+    .unwrap();
+
+    // sorted and deduplicated, common paths included
+    let deriv_paths = decode_derivation_paths(&bytes).unwrap();
+    assert_eq!(
+        deriv_paths,
+        vec![custom, fallback_bitcoin, fallback_testnet]
+    );
+}
+
+#[test]
 fn test_padded_encrypt_decrypt() {
     let keys = vec![pk2(), pk1()];
     let data = "test".as_bytes().to_vec();
@@ -919,6 +966,7 @@ fn test_padded_encrypt_decrypt() {
         &RustBitcoin,
         &mut OsRandom,
         vec![],
+        false,
         Content::Bip380,
         keys,
         &data,
@@ -945,6 +993,7 @@ fn test_secret_padded_encrypt_decrypt() {
         &RustBitcoin,
         &mut OsRandom,
         vec![],
+        false,
         Content::Bip380,
         keys,
         &data,

@@ -119,6 +119,10 @@ let backp = EncryptedBackup::new().set_payload(&descriptor).unwrap();
 let encrypted_blob = backp.encrypt().unwrap();
 ```
 
+The common derivation paths of the BIP are left out of the backup, since a decoder
+tries them anyway. `set_store_common_paths(true)` stores them too, for a decoder that
+only tries a few of them.
+
 ### Decryption
 ```rust
 

@@ -737,10 +737,12 @@ fn parse_v1_header(bytes: &[u8]) -> Result<(usize, Vec<DerivationPath>, Vec<[u8;
     ))
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn encrypt_chacha20_poly1305_v1<C: Crypto, R: Rng>(
     crypto: &C,
     rng: &mut R,
     derivation_paths: Vec<DerivationPath>,
+    store_common_paths: bool,
     content_metadata: Content,
     keys: Vec<[u8; XONLY_KEY_SIZE]>,
     data: &[u8],
@@ -750,6 +752,7 @@ pub fn encrypt_chacha20_poly1305_v1<C: Crypto, R: Rng>(
         crypto,
         rng,
         derivation_paths,
+        store_common_paths,
         &[(content_metadata, data)],
         keys,
         padding,
@@ -760,24 +763,33 @@ pub fn encrypt_chacha20_poly1305_v1_items<C: Crypto, R: Rng>(
     crypto: &C,
     rng: &mut R,
     derivation_paths: Vec<DerivationPath>,
+    store_common_paths: bool,
     items: &[(Content, &[u8])],
     keys: Vec<[u8; XONLY_KEY_SIZE]>,
     padding: Padding,
 ) -> Result<Vec<u8>, Error> {
     let nonce = draw_nonce(rng);
     let payload = build_v1_payload(items, padding)?;
-    encode_v1_backup(crypto, derivation_paths, keys, payload, nonce, |secrets| {
-        pad_individual_secrets(rng, secrets)
-    })
+    encode_v1_backup(
+        crypto,
+        derivation_paths,
+        store_common_paths,
+        keys,
+        payload,
+        nonce,
+        |secrets| pad_individual_secrets(rng, secrets),
+    )
 }
 
 /// Like [`encrypt_chacha20_poly1305_v1_items`] but with a caller-supplied `nonce`
 /// and the exact decoy individual secrets, for platforms without a random source.
 /// `decoy_individual_secrets` must hold exactly the padding target minus the real
 /// secret count entries, each non-zero and distinct, or `IndividualSecretsLength`.
+#[allow(clippy::too_many_arguments)]
 pub fn encrypt_chacha20_poly1305_v1_items_with_decoys<C: Crypto>(
     crypto: &C,
     derivation_paths: Vec<DerivationPath>,
+    store_common_paths: bool,
     items: &[(Content, &[u8])],
     keys: Vec<[u8; XONLY_KEY_SIZE]>,
     padding: Padding,
@@ -785,9 +797,15 @@ pub fn encrypt_chacha20_poly1305_v1_items_with_decoys<C: Crypto>(
     decoy_individual_secrets: &[[u8; 32]],
 ) -> Result<Vec<u8>, Error> {
     let payload = build_v1_payload(items, padding)?;
-    encode_v1_backup(crypto, derivation_paths, keys, payload, nonce, |secrets| {
-        pad_individual_secrets_with_decoys(secrets, decoy_individual_secrets)
-    })
+    encode_v1_backup(
+        crypto,
+        derivation_paths,
+        store_common_paths,
+        keys,
+        payload,
+        nonce,
+        |secrets| pad_individual_secrets_with_decoys(secrets, decoy_individual_secrets),
+    )
 }
 
 /// Encode the content items into the padded plaintext payload.
@@ -824,6 +842,7 @@ fn build_v1_payload(items: &[(Content, &[u8])], padding: Padding) -> Result<Vec<
 fn encode_v1_backup<C: Crypto, F>(
     crypto: &C,
     derivation_paths: Vec<DerivationPath>,
+    store_common_paths: bool,
     keys: Vec<[u8; XONLY_KEY_SIZE]>,
     payload: Vec<u8>,
     nonce: [u8; 12],
@@ -839,11 +858,12 @@ where
         .filter(|k| *k != NUMS_XONLY)
         .collect::<BTreeSet<[u8; XONLY_KEY_SIZE]>>();
 
-    // drop duplicate derivation paths and the ones a decoder already assumes
+    // drop duplicate derivation paths, and the ones a decoder already tries unless asked
+    // to store them
     let fallback_derivation_paths = fallback_derivation_path_set();
     let derivation_paths = derivation_paths
         .into_iter()
-        .filter(|path| !fallback_derivation_paths.contains(path))
+        .filter(|path| store_common_paths || !fallback_derivation_paths.contains(path))
         .collect::<BTreeSet<_>>()
         .into_iter()
         .collect::<Vec<_>>();

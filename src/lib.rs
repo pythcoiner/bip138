@@ -319,6 +319,7 @@ pub struct EncryptedBackup {
     payload: Payload,
     warnings: Vec<Warning>,
     padding: Padding,
+    store_common_paths: bool,
 }
 
 impl Default for EncryptedBackup {
@@ -334,6 +335,7 @@ impl Default for EncryptedBackup {
             payload: Payload::None,
             warnings: vec![],
             padding: Padding::None,
+            store_common_paths: false,
         }
     }
 }
@@ -379,6 +381,11 @@ impl EncryptedBackup {
     }
     pub fn set_padding(mut self, padding: Padding) -> Self {
         self.padding = padding;
+        self
+    }
+    /// Also store the common derivation paths of the BIP, left out by default.
+    pub fn set_store_common_paths(mut self, store_common_paths: bool) -> Self {
+        self.store_common_paths = store_common_paths;
         self
     }
     pub fn set_derivation_paths(mut self, derivation_paths: Vec<DerivationPath>) -> Self {
@@ -493,6 +500,7 @@ impl EncryptedBackup {
                                 &crypto,
                                 &mut ll::crypto::OsRandom,
                                 derivation_paths,
+                                self.store_common_paths,
                                 self.content.clone(),
                                 keys,
                                 payload,
@@ -504,6 +512,7 @@ impl EncryptedBackup {
                             ll::encrypt_chacha20_poly1305_v1_items_with_decoys(
                                 &crypto,
                                 derivation_paths,
+                                self.store_common_paths,
                                 &[(self.content.clone(), payload.as_slice())],
                                 keys,
                                 self.padding,
@@ -523,6 +532,7 @@ impl EncryptedBackup {
                                 &crypto,
                                 &mut ll::crypto::OsRandom,
                                 derivation_paths,
+                                self.store_common_paths,
                                 &payloads,
                                 keys,
                                 self.padding,
@@ -533,6 +543,7 @@ impl EncryptedBackup {
                             ll::encrypt_chacha20_poly1305_v1_items_with_decoys(
                                 &crypto,
                                 derivation_paths,
+                                self.store_common_paths,
                                 &payloads,
                                 keys,
                                 self.padding,
@@ -964,6 +975,7 @@ mod skip_unimplemented_tests {
             &crypto,
             &mut rng,
             vec![],
+            false,
             &items,
             xkeys,
             Padding::None,
@@ -991,6 +1003,7 @@ mod skip_unimplemented_tests {
             &crypto,
             &mut rng,
             vec![],
+            false,
             &items,
             xkeys,
             Padding::None,
@@ -1042,6 +1055,7 @@ mod proprietary_tests {
             &crypto,
             &mut rng,
             vec![],
+            false,
             items,
             xkeys,
             Padding::None,
@@ -1897,6 +1911,28 @@ mod tests {
             v = i.into();
             assert_eq!(v, Version::Unknown);
         }
+    }
+}
+
+#[cfg(all(test, feature = "rand"))]
+mod common_paths_tests {
+    use super::*;
+
+    #[test]
+    fn test_store_common_paths() {
+        // its single key derives at 48'/1'/0'/2', a common path
+        let descriptor = backend::tests::descr_1();
+        let backup = EncryptedBackup::new().set_payload(&descriptor).unwrap();
+        let paths = backup.get_derivation_paths();
+        assert_eq!(paths.len(), 1);
+
+        let bytes = backup.clone().encrypt().unwrap().bytes;
+        let metadata = EncryptedMetadata::from_encrypted_payload(&bytes).unwrap();
+        assert!(metadata.derivation_paths.is_empty());
+
+        let bytes = backup.set_store_common_paths(true).encrypt().unwrap().bytes;
+        let metadata = EncryptedMetadata::from_encrypted_payload(&bytes).unwrap();
+        assert_eq!(metadata.derivation_paths, paths);
     }
 }
 

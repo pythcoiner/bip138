@@ -174,6 +174,7 @@ fn rust_encode(input: &Normalized) -> Option<Vec<u8>> {
     ll::encrypt_chacha20_poly1305_v1_items_with_decoys(
         &RustBitcoin,
         paths,
+        false,
         &items,
         input.keys.clone(),
         padding,

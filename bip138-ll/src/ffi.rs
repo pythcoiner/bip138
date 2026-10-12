@@ -374,6 +374,7 @@ pub unsafe extern "C" fn bip138_encrypt(
         &crypto,
         &mut provider,
         derivation_paths,
+        false,
         content,
         key_list,
         data,
