@@ -1,8 +1,10 @@
 Command-line tool & Rust crate that lets you **encrypt descriptors (or arbitrary
 data)** with a set of **public** keys (or xpubs) and later decrypt when **at least
-one** of them is physically present—either via a local file containing the key or
-automatically fetched from a signing device.
+one** of them is physically present, either via a local file containing the key
+or automatically fetched from a signing device.
 Devices are **not mandatory**; you can use the tool completely off-device.
+It implements [BIP 138: Compact Encryption Scheme for Non-seed Wallet
+Data](https://github.com/bitcoin/bips/blob/master/bip-0138.md).
 
 ## CLI
 
@@ -138,7 +140,7 @@ let descriptor = EncryptedBackup::new()
 
 ## WASM support
 
-This carate can be build against these wasm targets:
+This crate can be built against these wasm targets:
  - `wasm32-unknown-unknown`
  - `wasm32-wasip1`
 
