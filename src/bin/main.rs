@@ -734,6 +734,7 @@ fn decrypted_to_bytes(decrypted: Decrypted) -> Result<Vec<u8>, CliError> {
         Decrypted::PolicyBackup(backup) => backup.to_payload().map_err(CliError::FailedToDecrypt),
         Decrypted::String(msg) => Ok(msg.into_bytes()),
         Decrypted::Bip138(bytes) => Ok(bytes),
+        Decrypted::WalletBackup(bytes) => Ok(bytes),
         _ => Err(CliError::Content),
     }
 }
@@ -1032,6 +1033,17 @@ mod tests {
         .unwrap();
 
         assert_eq!(document, b"next\n\x01\x02\x03");
+    }
+
+    #[test]
+    fn decrypted_to_document_outputs_wallet_backup_bytes() {
+        let document = decrypted_to_document(vec![
+            Decrypted::String("next".to_string()),
+            Decrypted::WalletBackup(br#"{"version":1}"#.to_vec()),
+        ])
+        .unwrap();
+
+        assert_eq!(document, b"next\n{\"version\":1}");
     }
 
     #[test]

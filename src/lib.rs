@@ -668,9 +668,8 @@ impl EncryptedBackup {
     fn extract_bip388<P>(_bytes: &[u8]) -> Option<Result<Decrypted<P>, Error>> {
         None
     }
-    /// BIP139 wallet backup metadata has no parser yet.
-    fn extract_bip139<P>(_bytes: &[u8]) -> Option<Result<Decrypted<P>, Error>> {
-        None
+    fn extract_bip139<P>(bytes: &[u8]) -> Option<Result<Decrypted<P>, Error>> {
+        Some(Ok(Decrypted::WalletBackup(bytes.to_vec())))
     }
     /// BIP329 labels have no parser yet.
     fn extract_bip329<P>(_bytes: &[u8]) -> Option<Result<Decrypted<P>, Error>> {
@@ -829,6 +828,29 @@ mod string_tests {
             .unwrap();
 
         assert_eq!(restored, vec![Decrypted::Bip138(vec![1, 2, 3])]);
+    }
+
+    #[test]
+    fn bip139_roundtrip() {
+        let payload = br#"{"version":1,"network":"bitcoin","name":"wallet"}"#.to_vec();
+        let keys = backend::tests::descr_1().keys().unwrap();
+        let bytes = EncryptedBackup::new()
+            .set_payload(&payload)
+            .unwrap()
+            .set_keys(keys.clone())
+            .set_content_type(Content::Bip139)
+            .encrypt()
+            .unwrap()
+            .bytes;
+
+        let restored = EncryptedBackup::new()
+            .set_encrypted_payload(&bytes)
+            .unwrap()
+            .set_keys(vec![keys[0]])
+            .decrypt()
+            .unwrap();
+
+        assert_eq!(restored, vec![Decrypted::WalletBackup(payload)]);
     }
 
     #[test]
