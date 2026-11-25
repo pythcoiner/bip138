@@ -127,7 +127,7 @@ impl ToPayload for Bip138 {
     }
 }
 
-impl ToPayload for Descriptor {
+impl ToPayload for miniscript::Descriptor<miniscript::DescriptorPublicKey> {
     fn to_payload(&self) -> Result<Vec<u8>, Error> {
         Ok(self.to_string().as_bytes().to_vec())
     }
